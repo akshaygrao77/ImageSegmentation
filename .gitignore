@@ -1,0 +1,6 @@
+**/img/
+**/ann/
+**/masks_human/
+**/masks_machine/
+*.zip
+**/split_dataset/
