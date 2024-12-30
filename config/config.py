@@ -11,16 +11,15 @@ def get_transform(is_train):
         # Separate transformations for image and mask
         transforms_image = Compose([
             # transforms.Resize((594, 800)),
-            RandomResizedCrop(size=(594, 800), scale=(0.8, 1.5), interpolation=InterpolationMode.BILINEAR),
+            RandomResizedCrop(size=(594, 800), scale=(0.7, 1.0), ratio=(0.72,1.0), interpolation=InterpolationMode.BILINEAR),
             RandomHorizontalFlip(p=0.5),
-            transforms.RandomApply(torch.nn.ModuleList([ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),]), p=0.6),
-            transforms.RandomEqualize(p=0.5),
+            transforms.RandomApply(torch.nn.ModuleList([ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),]), p=0.4),
+            transforms.RandomEqualize(p=0.35),
             ToTensor(),
             Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         transforms_mask = transforms.Compose([
-            # transforms.Resize((594, 800),interpolation=InterpolationMode.NEAREST),
-            RandomResizedCrop(size=(594, 800), scale=(0.8, 1.5), interpolation=InterpolationMode.BILINEAR),
+            RandomResizedCrop(size=(594, 800), scale=(0.7, 1.0), ratio=(0.72,1.0), interpolation=InterpolationMode.NEAREST),
             RandomHorizontalFlip(p=0.5),
             mask_to_tensor
         ])

@@ -33,6 +33,7 @@ class COCOSegmentationDataset(Dataset):
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.root, img_info['file_name'])
         image = Image.open(img_path).convert("RGB")
+        self.img_path = img_path
         
         # print("img_path ",img_path)
         # Load annotations (segmentation masks)

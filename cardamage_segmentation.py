@@ -9,8 +9,8 @@ from utils.visualize_utils import *
 from torch.utils.data import DataLoader
 
 from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
+from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 from transformers import AdamW, get_scheduler
-# from torch.optim import Adam
 from tqdm import tqdm
 import evaluate
 import wandb
@@ -155,6 +155,8 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
                     ignore_index=None,
                     reduce_labels=False
                 )
+                del predicted, masks
+                torch.cuda.empty_cache()
 
             # Update progress bar
             progress_bar.set_postfix({
@@ -212,8 +214,10 @@ def get_model_from_path(model,optimizer, lr_scheduler, model_path):
     model.load_state_dict(state_dict)
     
     # Load optimizer and scheduler states
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+    if(optimizer is not None):
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    if(lr_scheduler is not None):
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     
     epoch = checkpoint['epoch']  # Return the epoch if needed
     
@@ -222,6 +226,7 @@ def get_model_from_path(model,optimizer, lr_scheduler, model_path):
     return model, optimizer, lr_scheduler, epoch
 
 if __name__ == '__main__':
+    os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
 
@@ -231,8 +236,8 @@ if __name__ == '__main__':
     cardamages_imgs = os.path.join(cardamages_dir,"split_dataset")
     cardamages_anns = os.path.join(cardamages_dir,"split_annotations")
 
-    batch_size = 6
-    num_epochs = 15
+    batch_size = 12
+    num_epochs = 100
 
     # Get the colormapping from labelID of segmentation classes to color
     cardamage_id_to_color = get_colormapping(cardamages_dir+"/coco_damage_annotations.json",cardamages_dir+"/meta.json")
@@ -240,25 +245,32 @@ if __name__ == '__main__':
     train_cardamage_dataset = get_dataset(cardamages_imgs,cardamages_anns,is_train=True)
     val_cardamage_dataset = get_dataset(cardamages_imgs,cardamages_anns)
 
-    tr_cd_dataloader = DataLoader(train_cardamage_dataset, batch_size=batch_size, shuffle=True)
-    val_cd_dataloader = DataLoader(val_cardamage_dataset, batch_size=batch_size)
+    tr_cd_dataloader = DataLoader(train_cardamage_dataset, batch_size=batch_size, shuffle=True,num_workers=6,pin_memory=True)
+    val_cd_dataloader = DataLoader(val_cardamage_dataset, batch_size=batch_size,num_workers=6,pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_14.pt"
+    # start_net_path = "./checkpoints/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_17.pt"
     
     start_epoch = 0        
     model = get_segformermodel(len(cardamage_id_to_color),pretrained_model_name)
 
     # Define optimizer and learning rate scheduler
-    optimizer = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
+    optimizer = AdamW(model.parameters(), lr=5e-5, weight_decay=0.05)
 
     # Set up the learning rate scheduler
     num_training_steps = num_epochs * len(train_cardamage_dataset)
-    lr_scheduler = get_scheduler(
-        name="linear",
+    # lr_scheduler = get_scheduler(
+    #     name="linear",
+    #     optimizer=optimizer,
+    #     num_warmup_steps=200,
+    #     num_training_steps=num_training_steps,
+    # )
+
+    lr_scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=200,
         num_training_steps=num_training_steps,
+        num_cycles=10
     )
 
     if(start_net_path is not None):
