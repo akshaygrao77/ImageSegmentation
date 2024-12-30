@@ -4,3 +4,7 @@
 **/masks_machine/
 *.zip
 **/split_dataset/
+**/checkpoints/
+**/logs/
+**/__pycache__/
+**/wandb/
