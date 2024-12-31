@@ -6,6 +6,7 @@ def mask_to_tensor(mask):
     mask_tensor = transforms.functional.pil_to_tensor(mask).long()  # Keep integer labels
     return mask_tensor
 
+# RandomAutocontrast , RandomEqualize
 def get_transform(is_train):
     if is_train:
         # Separate transformations for image and mask
@@ -14,7 +15,7 @@ def get_transform(is_train):
             RandomResizedCrop(size=(594, 800), scale=(0.7, 1.0), ratio=(0.72,1.0), interpolation=InterpolationMode.BILINEAR),
             RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(torch.nn.ModuleList([ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),]), p=0.4),
-            transforms.RandomEqualize(p=0.35),
+            transforms.RandomAutocontrast(p=0.1),
             ToTensor(),
             Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
