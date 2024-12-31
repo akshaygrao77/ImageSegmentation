@@ -231,12 +231,13 @@ if __name__ == '__main__':
     wand_project_name="Car_Damage_Segmentation"
 
     pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     cardamages_dir = os.path.join(datadir,"Car_damages_dataset")
     cardamages_imgs = os.path.join(cardamages_dir,"split_dataset")
     cardamages_anns = os.path.join(cardamages_dir,"split_annotations")
 
-    batch_size = 12
+    batch_size = 16
     num_epochs = 100
 
     # Get the colormapping from labelID of segmentation classes to color
@@ -245,20 +246,21 @@ if __name__ == '__main__':
     train_cardamage_dataset = get_dataset(cardamages_imgs,cardamages_anns,is_train=True)
     val_cardamage_dataset = get_dataset(cardamages_imgs,cardamages_anns)
 
-    tr_cd_dataloader = DataLoader(train_cardamage_dataset, batch_size=batch_size, shuffle=True,num_workers=6,pin_memory=True)
-    val_cd_dataloader = DataLoader(val_cardamage_dataset, batch_size=batch_size,num_workers=6,pin_memory=True)
+    tr_cd_dataloader = DataLoader(train_cardamage_dataset, batch_size=batch_size, shuffle=True,num_workers=8,pin_memory=True)
+    val_cd_dataloader = DataLoader(val_cardamage_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_17.pt"
+    # start_net_path = "./checkpoints/contrast1/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_55.pt"
     
     start_epoch = 0        
     model = get_segformermodel(len(cardamage_id_to_color),pretrained_model_name)
 
     # Define optimizer and learning rate scheduler
-    optimizer = AdamW(model.parameters(), lr=5e-5, weight_decay=0.05)
+    optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
     # Set up the learning rate scheduler
-    num_training_steps = num_epochs * len(train_cardamage_dataset)
+    num_training_steps = num_epochs * len(tr_cd_dataloader)
+    print("num_training_steps ",num_training_steps,num_epochs * len(train_cardamage_dataset))
     # lr_scheduler = get_scheduler(
     #     name="linear",
     #     optimizer=optimizer,
@@ -285,7 +287,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_path = os.path.join("./checkpoints",pretrained_model_name.replace("/","_"))
+    model_save_path = os.path.join("./checkpoints/contrast1/",pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
     if(is_log_wandb):
         wandb_config = dict()
