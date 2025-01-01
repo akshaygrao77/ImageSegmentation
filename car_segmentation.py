@@ -11,19 +11,49 @@ from torch.utils.data import DataLoader
 from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
 from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 from transformers import AdamW, get_scheduler
+from utils.generic_utils import *
 from tqdm import tqdm
 import evaluate
 import wandb
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score,confusion_matrix
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1.0):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        probs = F.softmax(logits, dim=1)
+        targets_one_hot = F.one_hot(targets, num_classes=logits.size(1)).permute(0, 3, 1, 2).float()
+        intersection = torch.sum(probs * targets_one_hot, dim=(2, 3))  # Calculate intersection
+        union = torch.sum(probs + targets_one_hot, dim=(2, 3))  # Calculate union
+        dice_score = (2 * intersection + self.smooth) / (union + self.smooth)  # Dice score
+        return 1 - dice_score.mean()  # Dice loss
+
+def combined_loss(logits, targets, alpha=0.5):
+    """
+    Combined Cross-Entropy and Dice Loss with proper upsampling of logits.
+    """
+    # Upsample logits to match the input image size
+    upsampled_logits = F.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+    
+    # Cross-Entropy Loss
+    ce_loss = F.cross_entropy(upsampled_logits, targets, reduction='mean')
+    
+    # Dice Loss
+    dice_loss = DiceLoss()(upsampled_logits, targets)
+    
+    # Combined loss
+    return alpha * ce_loss + (1 - alpha) * dice_loss
+
 def get_segformermodel(num_labels,model_name):
     # nvidia/segformer-b5-finetuned-cityscapes-1024-1024
     model = SegformerForSemanticSegmentation.from_pretrained(model_name,num_labels=num_labels+1,ignore_mismatched_sizes=True)
-
-    # Modify the classifier layer to match the number of classes in your dataset
-    # Assuming the model's `decode_head` has a classifier head for segmentation.
-    # model.decode_head.classifier = torch.nn.Conv2d(768, num_labels, kernel_size=1)
 
     return model
 
@@ -77,26 +107,6 @@ def evaluate_model(model,num_labels,val_dataloader):
 
     return avg_val_loss,metrics["mean_iou"],metrics["mean_accuracy"],avg_pixel_acc / len(val_dataloader), avg_dice_coeff / len(val_dataloader)
 
-# Additional helper functions for metrics
-def pixel_accuracy(predictions, targets):
-    """Calculate Pixel Accuracy"""
-    predictions = predictions.view(-1).cpu().numpy().astype(np.int32)
-    targets = targets.view(-1).cpu().numpy().astype(np.int32)
-    return accuracy_score(targets, predictions)
-
-def dice_coefficient(predictions, targets, num_classes):
-    """Calculate Dice Coefficient"""
-    dice_scores = []
-    for class_id in range(num_classes):
-        pred_class = (predictions == class_id).float()
-        target_class = (targets == class_id).float()
-        intersection = torch.sum(pred_class * target_class)
-        union = torch.sum(pred_class) + torch.sum(target_class)
-        dice_score = (2. * intersection + 1e-6) / (union + 1e-6)
-        dice_scores.append(dice_score)
-    return torch.tensor(dice_scores).mean()
-
-
 def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0):
     is_log_wandb = not(wand_project_name is None)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -121,6 +131,9 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
             # Forward pass
             outputs = model(images, labels=masks)
             loss, logits = outputs.loss.mean(), outputs.logits
+
+            if("damage" in model_path):
+                loss = combined_loss(logits, masks)
 
             # Backward pass
             loss.backward()
@@ -193,45 +206,19 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
     
     return 
 
-def get_model_from_path(model,optimizer, lr_scheduler, model_path):
-    map_location = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Load checkpoint
-    checkpoint = torch.load(model_path, map_location=map_location)
-    
-    # Load model state dict (strip `module.` for DataParallel models)
-    state_dict = checkpoint['model_state_dict']
-    
-    # If using DataParallel, remove the 'module.' prefix
-    if 'module.' in next(iter(state_dict)):
-        state_dict = {key.replace('module.', ''): value for key, value in state_dict.items()}
-    
-    model.load_state_dict(state_dict)
-    
-    # Load optimizer and scheduler states
-    if(optimizer is not None):
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    if(lr_scheduler is not None):
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-    
-    epoch = checkpoint['epoch']  # Return the epoch if needed
-    
-    print(f"Checkpoint loaded from {model_path}")
-    
-    return model, optimizer, lr_scheduler, epoch
-
 if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
 
     # Car_damages_dataset, Car_parts_dataset
-    dataset = "Car_parts_dataset"
+    dataset = "Car_damages_dataset"
 
     if(dataset == "Car_damages_dataset"):
         coco_path = "coco_damage_annotations.json"
     elif(dataset == "Car_parts_dataset"):
         coco_path = "coco_parts_annotations.json"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
 
@@ -302,7 +289,7 @@ if __name__ == '__main__':
         wandb_config["model_name"] = pretrained_model_name
         wandb_config["dataset"] = dataset
         wandb_config["start_net_path"] = start_net_path
-        wandb_run_name = "DMG" if "damage" in dataset else "PRT" +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]
+        wandb_run_name = ("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]
 
         wandb.init(
             project=f"{wand_project_name}",
