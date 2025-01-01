@@ -139,12 +139,7 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
 
                 # Add predictions and ground truth to metric (for Mean IoU)
                 metric.add_batch(predictions=predicted.detach().cpu().numpy(), references=masks.detach().cpu().numpy())
-
-                # Calculate Pixel Accuracy, Dice Coefficient, Mean Accuracy
-                pixel_acc = pixel_accuracy(predicted, masks)
-                dice_coeff = dice_coefficient(predicted, masks, num_labels+1)
-                avg_pixel_acc += pixel_acc
-                avg_dice_coeff += dice_coeff
+            
             total_loss += loss.item()
             # Log metrics every 10 batches
             if idx % 10 == 0:
@@ -162,9 +157,7 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
             progress_bar.set_postfix({
                 "loss": loss.item(),
                 "mean_iou": metrics["mean_iou"],
-                "mean_accuracy": metrics["mean_accuracy"],
-                "pixel_accuracy": pixel_acc,
-                "dice_coeff": dice_coeff,
+                "mean_accuracy": metrics["mean_accuracy"]
             })
 
         # Save model and optimizer state
@@ -178,6 +171,7 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
         # Log validation performance
         current_lr = optimizer.param_groups[0]['lr']
         scheduler_type = str(lr_scheduler)
+        train_loss, train_iou, train_acc,train_pixel_accuracy,train_dice_coeff = evaluate_model(model, num_labels, train_dataloader)
         val_loss, val_iou, val_acc,val_pixel_accuracy,val_dice_coeff = evaluate_model(model, num_labels, val_dataloader)
 
         if is_log_wandb:
@@ -188,13 +182,13 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
                 "val_iou": val_iou,
                 "val_accuracy": val_acc,
                 "val_loss": val_loss,
-                "mean_iou": metrics["mean_iou"],
-                "mean_accuracy": metrics["mean_accuracy"],
-                "pixel_accuracy": avg_pixel_acc/len(train_dataloader),
-                "dice_coeff": avg_dice_coeff/len(train_dataloader),
+                "mean_iou": train_iou,
+                "mean_accuracy": train_acc,
+                "pixel_accuracy": train_pixel_accuracy,
+                "dice_coeff": train_dice_coeff,
                 "val_pixel_accuracy": val_pixel_accuracy,
                 "val_dice_coeff": val_dice_coeff,
-                "loss": total_loss/len(train_dataloader)
+                "loss": train_loss
             })
     
     return 
@@ -230,37 +224,45 @@ if __name__ == '__main__':
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
 
-    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # Car_damages_dataset, Car_parts_dataset
+    dataset = "Car_parts_dataset"
+
+    if(dataset == "Car_damages_dataset"):
+        coco_path = "coco_damage_annotations.json"
+    elif(dataset == "Car_parts_dataset"):
+        coco_path = "coco_parts_annotations.json"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
-    cardamages_dir = os.path.join(datadir,"Car_damages_dataset")
-    cardamages_imgs = os.path.join(cardamages_dir,"split_dataset")
-    cardamages_anns = os.path.join(cardamages_dir,"split_annotations")
 
-    batch_size = 16
+    car_dir = os.path.join(datadir,dataset)
+    car_imgs = os.path.join(car_dir,"split_dataset")
+    car_anns = os.path.join(car_dir,"split_annotations")
+
+    batch_size = 14
     num_epochs = 100
 
     # Get the colormapping from labelID of segmentation classes to color
-    cardamage_id_to_color = get_colormapping(cardamages_dir+"/coco_damage_annotations.json",cardamages_dir+"/meta.json")
+    car_id_to_color = get_colormapping(os.path.join(car_dir,coco_path),car_dir+"/meta.json")
 
-    train_cardamage_dataset = get_dataset(cardamages_imgs,cardamages_anns,is_train=True)
-    val_cardamage_dataset = get_dataset(cardamages_imgs,cardamages_anns)
+    train_car_dataset = get_dataset(car_imgs,car_anns,is_train=True)
+    val_car_dataset = get_dataset(car_imgs,car_anns)
 
-    tr_cd_dataloader = DataLoader(train_cardamage_dataset, batch_size=batch_size, shuffle=True,num_workers=8,pin_memory=True)
-    val_cd_dataloader = DataLoader(val_cardamage_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
+    tr_cd_dataloader = DataLoader(train_car_dataset, batch_size=batch_size, shuffle=True,num_workers=8,pin_memory=True)
+    val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
 
     start_net_path = None
     # start_net_path = "./checkpoints/contrast1/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_55.pt"
     
     start_epoch = 0        
-    model = get_segformermodel(len(cardamage_id_to_color),pretrained_model_name)
+    model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
 
     # Define optimizer and learning rate scheduler
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
     # Set up the learning rate scheduler
     num_training_steps = num_epochs * len(tr_cd_dataloader)
-    print("num_training_steps ",num_training_steps,num_epochs * len(train_cardamage_dataset))
+    print("num_training_steps ",num_training_steps,num_epochs * len(tr_cd_dataloader),car_id_to_color)
     # lr_scheduler = get_scheduler(
     #     name="linear",
     #     optimizer=optimizer,
@@ -276,7 +278,7 @@ if __name__ == '__main__':
     )
 
     if(start_net_path is not None):
-        model = get_segformermodel(len(cardamage_id_to_color),pretrained_model_name)
+        model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
         model,optimizer,lr_scheduler,start_epoch = get_model_from_path(model,optimizer,lr_scheduler,start_net_path)
     device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.cuda.empty_cache()
@@ -287,7 +289,9 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_path = os.path.join("./checkpoints/contrast1/",pretrained_model_name.replace("/","_"))
+    model_save_dir = os.path.join("./checkpoints/",dataset)
+    os.makedirs(model_save_dir, exist_ok=True)
+    model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
     if(is_log_wandb):
         wandb_config = dict()
@@ -296,14 +300,16 @@ if __name__ == '__main__':
         wandb_config["num_epochs"] = num_epochs
         wandb_config["batch_size"] = batch_size
         wandb_config["model_name"] = pretrained_model_name
-        wandb_config["dataset"] = cardamages_dir
+        wandb_config["dataset"] = dataset
         wandb_config["start_net_path"] = start_net_path
+        wandb_run_name = "DMG" if "damage" in dataset else "PRT" +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]
 
         wandb.init(
             project=f"{wand_project_name}",
+            name=f"{wandb_run_name}",
             config=wandb_config,
         )
 
-    train_model(model,optimizer,lr_scheduler,len(cardamage_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch)
+    train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch)
 
 
