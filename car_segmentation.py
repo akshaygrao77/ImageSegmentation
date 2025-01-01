@@ -43,12 +43,17 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
     
     def forward(self, logits, targets):
-        # Compute Cross-Entropy Loss
+        # Apply softmax to logits to get predicted probabilities (logits -> probabilities)
+        probs = F.softmax(logits, dim=1)
+        
+        # Select the probabilities corresponding to the true class
+        target_probs = probs.gather(1, targets.unsqueeze(1))  # Shape: (B, 1)
+        
+        # Compute Cross-Entropy Loss (for the true class)
         ce_loss = F.cross_entropy(logits, targets, reduction='none')
-        # Compute the probability of the true class
-        pt = torch.exp(-ce_loss)
+        
         # Compute Focal Loss
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        focal_loss = self.alpha * (1 - target_probs) ** self.gamma * ce_loss
         
         if self.reduction == 'mean':
             return focal_loss.mean()
@@ -131,7 +136,7 @@ def evaluate_model(model,num_labels,val_dataloader):
 
     return avg_val_loss,metrics["mean_iou"],metrics["mean_accuracy"],avg_pixel_acc / len(val_dataloader), avg_dice_coeff / len(val_dataloader)
 
-def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0,loss_type=None):
+def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0,loss_type=None,alpha=0.5):
     is_log_wandb = not(wand_project_name is None)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -157,7 +162,7 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
             loss, logits = outputs.loss.mean(), outputs.logits
 
             if(loss_type is not None):
-                loss = combined_loss(logits, masks,loss_type)
+                loss = combined_loss(logits, masks,loss_type,alpha)
 
             # Backward pass
             loss.backward()
@@ -236,6 +241,7 @@ if __name__ == '__main__':
     wand_project_name="Car_Damage_Segmentation"
     # dice, focal , None
     loss_type='focal'
+    alpha = 0.25
 
     # Car_damages_dataset, Car_parts_dataset
     dataset = "Car_damages_dataset"
@@ -302,7 +308,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_dir = os.path.join(os.path.join("./checkpoints/",dataset),loss_type)
+    model_save_dir = os.path.join(os.path.join("./checkpoints/",dataset),loss_type+"_"+str(alpha))
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
@@ -316,7 +322,8 @@ if __name__ == '__main__':
         wandb_config["dataset"] = dataset
         wandb_config["start_net_path"] = start_net_path
         wandb_config["loss_type"] = loss_type
-        wandb_run_name = ("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type)
+        wandb_config["alpha"] = alpha
+        wandb_run_name = ("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
 
         wandb.init(
             project=f"{wand_project_name}",
@@ -324,6 +331,6 @@ if __name__ == '__main__':
             config=wandb_config,
         )
 
-    train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch,loss_type)
+    train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch,loss_type,alpha)
 
 
