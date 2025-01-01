@@ -35,7 +35,29 @@ class DiceLoss(nn.Module):
         dice_score = (2 * intersection + self.smooth) / (union + self.smooth)  # Dice score
         return 1 - dice_score.mean()  # Dice loss
 
-def combined_loss(logits, targets, alpha=0.5):
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+    
+    def forward(self, logits, targets):
+        # Compute Cross-Entropy Loss
+        ce_loss = F.cross_entropy(logits, targets, reduction='none')
+        # Compute the probability of the true class
+        pt = torch.exp(-ce_loss)
+        # Compute Focal Loss
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+def combined_loss(logits, targets,loss_type, alpha=0.5):
     """
     Combined Cross-Entropy and Dice Loss with proper upsampling of logits.
     """
@@ -44,12 +66,14 @@ def combined_loss(logits, targets, alpha=0.5):
     
     # Cross-Entropy Loss
     ce_loss = F.cross_entropy(upsampled_logits, targets, reduction='mean')
-    
-    # Dice Loss
-    dice_loss = DiceLoss()(upsampled_logits, targets)
-    
+    m_loss = 1/(1-alpha)
+    if(loss_type == 'dice'):
+        # Dice Loss
+        m_loss = DiceLoss()(upsampled_logits, targets)
+    elif(loss_type == 'focal'):
+        m_loss = FocalLoss()(upsampled_logits, targets)
     # Combined loss
-    return alpha * ce_loss + (1 - alpha) * dice_loss
+    return alpha * ce_loss + (1 - alpha) * m_loss
 
 def get_segformermodel(num_labels,model_name):
     # nvidia/segformer-b5-finetuned-cityscapes-1024-1024
@@ -107,7 +131,7 @@ def evaluate_model(model,num_labels,val_dataloader):
 
     return avg_val_loss,metrics["mean_iou"],metrics["mean_accuracy"],avg_pixel_acc / len(val_dataloader), avg_dice_coeff / len(val_dataloader)
 
-def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0):
+def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0,loss_type=None):
     is_log_wandb = not(wand_project_name is None)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -132,8 +156,8 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
             outputs = model(images, labels=masks)
             loss, logits = outputs.loss.mean(), outputs.logits
 
-            if("damage" in model_path):
-                loss = combined_loss(logits, masks)
+            if(loss_type is not None):
+                loss = combined_loss(logits, masks,loss_type)
 
             # Backward pass
             loss.backward()
@@ -210,6 +234,8 @@ if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
+    # dice, focal , None
+    loss_type='focal'
 
     # Car_damages_dataset, Car_parts_dataset
     dataset = "Car_damages_dataset"
@@ -276,7 +302,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_dir = os.path.join("./checkpoints/",dataset)
+    model_save_dir = os.path.join(os.path.join("./checkpoints/",dataset),loss_type)
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
@@ -289,7 +315,8 @@ if __name__ == '__main__':
         wandb_config["model_name"] = pretrained_model_name
         wandb_config["dataset"] = dataset
         wandb_config["start_net_path"] = start_net_path
-        wandb_run_name = ("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]
+        wandb_config["loss_type"] = loss_type
+        wandb_run_name = ("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type)
 
         wandb.init(
             project=f"{wand_project_name}",
@@ -297,6 +324,6 @@ if __name__ == '__main__':
             config=wandb_config,
         )
 
-    train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch)
+    train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch,loss_type)
 
 
