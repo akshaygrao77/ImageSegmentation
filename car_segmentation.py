@@ -66,17 +66,19 @@ def combined_loss(logits, targets,loss_type, alpha=0.5):
     """
     Combined Cross-Entropy and Dice Loss with proper upsampling of logits.
     """
-    # Upsample logits to match the input image size
-    upsampled_logits = F.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+    # upsampled_logits = F.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+    # Downsample targets to match the input image size
+    # Important: Downsampling targets for loss calculation seems to be better compared to upsampling logits bcoz upsampling logits can introduce artifacts
+    targets = F.interpolate(targets.unsqueeze(1).float(), size=logits.shape[-2:], mode="nearest").squeeze(1).long()
     
     # Cross-Entropy Loss
-    ce_loss = F.cross_entropy(upsampled_logits, targets, reduction='mean')
+    ce_loss = F.cross_entropy(logits, targets, reduction='mean')
     m_loss = 1/(1-alpha)
     if(loss_type == 'dice'):
         # Dice Loss
-        m_loss = DiceLoss()(upsampled_logits, targets)
+        m_loss = DiceLoss()(logits, targets)
     elif(loss_type == 'focal'):
-        m_loss = FocalLoss()(upsampled_logits, targets)
+        m_loss = FocalLoss()(logits, targets)
     # Combined loss
     return alpha * ce_loss + (1 - alpha) * m_loss
 
@@ -240,8 +242,8 @@ if __name__ == '__main__':
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
     # dice, focal , None
-    loss_type='focal'
-    alpha = 0.25
+    loss_type = 'focal'
+    alpha = 0.75
 
     # Car_damages_dataset, Car_parts_dataset
     dataset = "Car_damages_dataset"
@@ -258,7 +260,8 @@ if __name__ == '__main__':
     car_imgs = os.path.join(car_dir,"split_dataset")
     car_anns = os.path.join(car_dir,"split_annotations")
 
-    batch_size = 14
+    # Important: BS below this causes performance degradation
+    batch_size = 16
     num_epochs = 100
 
     # Get the colormapping from labelID of segmentation classes to color
@@ -308,7 +311,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_dir = os.path.join(os.path.join("./checkpoints/",dataset),loss_type+"_"+str(alpha))
+    model_save_dir = os.path.join(os.path.join("./checkpoints/",dataset),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
