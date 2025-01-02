@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from structures.heirarchical_seg_model import Hierarchical_SegModel
+from structures.heirarchical_seg_model import Hierarchical_SegModel,Fusion_SegModel
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1.0):
@@ -249,8 +249,8 @@ if __name__ == '__main__':
     loss_type = None
     alpha = 0.9
 
-    # None, 'hierarchical
-    model_type = 'hierarchical'
+    # None, 'hierarchical' , 'fusion'
+    model_type = 'fusion'
 
     # Car_damages_dataset, Car_parts_dataset
     dataset = "Car_damages_dataset"
@@ -265,7 +265,7 @@ if __name__ == '__main__':
     car_anns = os.path.join(car_dir,"split_annotations")
 
     # Important: BS below 16 causes performance degradation
-    batch_size = 14
+    batch_size = 16
     num_epochs = 100
 
     # Get the colormapping from labelID of segmentation classes to color
@@ -285,13 +285,16 @@ if __name__ == '__main__':
     start_epoch = 0
     if(model_type is None):
         model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
-    elif(model_type == 'hierarchical'):
+    elif(model_type == 'hierarchical' or model_type == 'fusion'):
         superseg_ds = "Car_parts_dataset"
         superseg_dir = os.path.join(datadir,superseg_ds)
         superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
         super_segmodel = get_segformermodel(len(superseg_id_to_color),pretrained_model_name)
         super_segmodel,_,_,_ = get_model_from_path(super_segmodel,None,None,super_segmodel_path)
-        model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
+        if(model_type=='hierarchical'):
+            model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
+        elif(model_type == 'fusion'):
+            model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
 
     # Define optimizer and learning rate scheduler
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
@@ -316,13 +319,16 @@ if __name__ == '__main__':
     if(start_net_path is not None):
         if(model_type is None):
             model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
-        elif(model_type == 'hierarchical'):
+        elif(model_type == 'hierarchical' or model_type == 'fusion'):
             superseg_ds = "Car_parts_dataset"
             superseg_dir = os.path.join(datadir,superseg_ds)
             superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
             super_segmodel = get_segformermodel(len(superseg_id_to_color),pretrained_model_name)
             super_segmodel,_,_,_ = get_model_from_path(super_segmodel,None,None,super_segmodel_path)
-            model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
+            if(model_type=='hierarchical'):
+                model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
+            elif(model_type == 'fusion'):
+                model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
         model,optimizer,lr_scheduler,start_epoch = get_model_from_path(model,optimizer,lr_scheduler,start_net_path)
     device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.cuda.empty_cache()
@@ -333,7 +339,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_dir = os.path.join(os.path.join("./checkpoints/",dataset),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
+    model_save_dir = os.path.join(os.path.join("./checkpoints/",dataset+("" if model_type is None else "/"+model_type[:4])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)

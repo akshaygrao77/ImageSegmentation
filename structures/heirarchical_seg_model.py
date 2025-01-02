@@ -2,6 +2,8 @@ from torch import nn
 import torch
 from transformers import SegformerForSemanticSegmentation
 import torch.nn.functional as F
+from transformers.modeling_outputs import ModelOutput
+from typing import Optional
 
 def modify_segformer_input_channels(segmodel, new_input_channels):
     """
@@ -57,7 +59,7 @@ class Hierarchical_SegModel(nn.Module):
         
         self.supersegmodel.eval()
 
-        self.model = SegformerForSemanticSegmentation.from_pretrained(model_name,num_labels=num_labels+1,ignore_mismatched_sizes=True)
+        self.model = SegformerForSemanticSegmentation.from_pretrained(model_name,num_labels=num_labels,ignore_mismatched_sizes=True)
         # The modified segformer input size needs to be mask output channels + 3(here, 3 is original input image channel size)
         self.model = modify_segformer_input_channels(self.model,num_out_channels+3)
 
@@ -80,3 +82,58 @@ class Hierarchical_SegModel(nn.Module):
         output = self.model(combined_input,labels)
 
         return output
+
+class FusionSegOutput(ModelOutput):
+    """
+    Custom output class to mimic the SegFormer output structure.
+    """
+    loss: Optional[torch.Tensor] = None
+    logits: torch.Tensor = None
+
+class Fusion_SegModel(nn.Module):
+    def __init__(self,supersegmodel,num_labels_superseg,num_labels,model_name, seed=2022,intermediate_channels=512):
+        super().__init__()
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu")
+        torch.manual_seed(seed)
+        self.fusion_layer = nn.Sequential(
+            nn.Conv2d(num_labels_superseg+num_labels, intermediate_channels, 3,padding='same'),
+            nn.BatchNorm2d(intermediate_channels),
+            nn.ReLU(),
+            nn.Conv2d(intermediate_channels, intermediate_channels//2, 3,padding='same'),
+            nn.BatchNorm2d(intermediate_channels//2),
+            nn.ReLU(),
+            nn.Conv2d(intermediate_channels//2, num_labels, 3,padding='same')  # Final output
+        )
+
+        self.supersegmodel = supersegmodel
+        for param in self.supersegmodel.parameters():
+            param.requires_grad = False  # Freeze parameters
+        
+        self.supersegmodel.eval()
+
+        self.model = SegformerForSemanticSegmentation.from_pretrained(model_name,num_labels=num_labels,ignore_mismatched_sizes=True)
+
+    def get_mask_from_supermodel(self,inp):
+        with torch.no_grad():  # Ensure superclass model is frozen
+            outputs = self.supersegmodel(inp)
+        
+        return outputs.logits
+
+
+    def forward(self, inp, labels):
+        with torch.no_grad():
+            superseg_masks = self.get_mask_from_supermodel(inp)
+        # Pass the input through the SegFormer model
+        output = self.model(inp,labels)
+        # Concatenate the output masks with the superclass segmentation masks
+        combined_masks = torch.cat([output.logits, superseg_masks], dim=1)  # Shape: (B, C+M, H, W)
+
+        output_logits = self.fusion_layer(combined_masks)
+
+        labels = F.interpolate(labels.unsqueeze(1).float(), size=output_logits.shape[-2:], mode="nearest").squeeze(1).long()
+    
+        # Cross-Entropy Loss
+        ce_loss = F.cross_entropy(output_logits, labels, reduction='mean')
+
+        return FusionSegOutput(loss=ce_loss, logits=output_logits)
