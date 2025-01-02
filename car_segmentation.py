@@ -22,6 +22,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from structures.heirarchical_seg_model import Hierarchical_SegModel
+
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1.0):
         super(DiceLoss, self).__init__()
@@ -79,8 +81,10 @@ def combined_loss(logits, targets,loss_type, alpha=0.5):
         m_loss = DiceLoss()(logits, targets)
     elif(loss_type == 'focal'):
         m_loss = FocalLoss()(logits, targets)
+    elif(loss_type == 'di_foc'):
+        return (1-alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss()(logits, targets)
     # Combined loss
-    return alpha * ce_loss + (1 - alpha) * m_loss
+    return (1-alpha) * ce_loss + alpha * m_loss
 
 def get_segformermodel(num_labels,model_name):
     # nvidia/segformer-b5-finetuned-cityscapes-1024-1024
@@ -241,17 +245,17 @@ if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
-    # dice, focal , None
-    loss_type = 'focal'
-    alpha = 0.75
+    # dice, focal , None , di_foc
+    loss_type = None
+    alpha = 0.9
+
+    # None, 'hierarchical
+    model_type = 'hierarchical'
 
     # Car_damages_dataset, Car_parts_dataset
     dataset = "Car_damages_dataset"
 
-    if(dataset == "Car_damages_dataset"):
-        coco_path = "coco_damage_annotations.json"
-    elif(dataset == "Car_parts_dataset"):
-        coco_path = "coco_parts_annotations.json"
+    coco_path = get_cocopath(dataset)
     pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
@@ -260,8 +264,8 @@ if __name__ == '__main__':
     car_imgs = os.path.join(car_dir,"split_dataset")
     car_anns = os.path.join(car_dir,"split_annotations")
 
-    # Important: BS below this causes performance degradation
-    batch_size = 16
+    # Important: BS below 16 causes performance degradation
+    batch_size = 14
     num_epochs = 100
 
     # Get the colormapping from labelID of segmentation classes to color
@@ -276,8 +280,18 @@ if __name__ == '__main__':
     start_net_path = None
     # start_net_path = "./checkpoints/contrast1/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_55.pt"
     
-    start_epoch = 0        
-    model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
+    super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+
+    start_epoch = 0
+    if(model_type is None):
+        model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
+    elif(model_type == 'hierarchical'):
+        superseg_ds = "Car_parts_dataset"
+        superseg_dir = os.path.join(datadir,superseg_ds)
+        superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
+        super_segmodel = get_segformermodel(len(superseg_id_to_color),pretrained_model_name)
+        super_segmodel,_,_,_ = get_model_from_path(super_segmodel,None,None,super_segmodel_path)
+        model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
 
     # Define optimizer and learning rate scheduler
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
@@ -300,7 +314,15 @@ if __name__ == '__main__':
     )
 
     if(start_net_path is not None):
-        model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
+        if(model_type is None):
+            model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
+        elif(model_type == 'hierarchical'):
+            superseg_ds = "Car_parts_dataset"
+            superseg_dir = os.path.join(datadir,superseg_ds)
+            superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
+            super_segmodel = get_segformermodel(len(superseg_id_to_color),pretrained_model_name)
+            super_segmodel,_,_,_ = get_model_from_path(super_segmodel,None,None,super_segmodel_path)
+            model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
         model,optimizer,lr_scheduler,start_epoch = get_model_from_path(model,optimizer,lr_scheduler,start_net_path)
     device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.cuda.empty_cache()
@@ -326,7 +348,8 @@ if __name__ == '__main__':
         wandb_config["start_net_path"] = start_net_path
         wandb_config["loss_type"] = loss_type
         wandb_config["alpha"] = alpha
-        wandb_run_name = ("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
+        wandb_config["model_type"]=model_type
+        wandb_run_name = ("" if model_type is None else model_type[:4]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
 
         wandb.init(
             project=f"{wand_project_name}",

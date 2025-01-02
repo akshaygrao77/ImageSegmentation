@@ -37,7 +37,7 @@ def modify_segformer_input_channels(segmodel, new_input_channels):
     return segmodel
 
 class Hierarchical_SegModel(nn.Module):
-    def __init__(self,supersegmodel, input_channel,num_labels,model_name, seed=2022,num_out_channels=3,intermediate_channels=1024):
+    def __init__(self,supersegmodel, input_channel,num_labels,model_name, seed=2022,num_out_channels=3,intermediate_channels=512):
         super().__init__()
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
@@ -61,22 +61,22 @@ class Hierarchical_SegModel(nn.Module):
         # The modified segformer input size needs to be mask output channels + 3(here, 3 is original input image channel size)
         self.model = modify_segformer_input_channels(self.model,num_out_channels+3)
 
-    def get_mask_from_supermodel(self,inp):
+    def get_mask_from_supermodel(self,inp,masks):
         with torch.no_grad():  # Ensure superclass model is frozen
-            outputs = self.supersegmodel(inp)
+            outputs = self.supersegmodel(inp,masks)
             upsampled_logits = F.interpolate(outputs.logits, size=inp.shape[-2:], mode="bilinear", align_corners=False)
         
         return upsampled_logits
 
 
-    def forward(self, inp):
+    def forward(self, inp, labels):
         with torch.no_grad():
-            superseg_masks = self.get_mask_from_supermodel(inp)
+            superseg_masks = self.get_mask_from_supermodel(inp,None)
         superseg_masks = self.mask_reducer(superseg_masks)
         # Concatenate the input image with the superclass segmentation masks
         combined_input = torch.cat([inp, superseg_masks], dim=1)  # Shape: (B, C+M, H, W)
 
         # Pass the combined input through the SegFormer model
-        output = self.model(combined_input)
+        output = self.model(combined_input,labels)
 
         return output

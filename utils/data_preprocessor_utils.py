@@ -33,3 +33,11 @@ def get_dataset(img_dir, ann_dir, is_train=False):
         transforms_mask=transforms_mask
     )
     return dataset
+
+def get_cocopath(dataset):
+    if(dataset == "Car_damages_dataset"):
+        coco_path = "coco_damage_annotations.json"
+    elif(dataset == "Car_parts_dataset"):
+        coco_path = "coco_parts_annotations.json"
+
+    return coco_path
