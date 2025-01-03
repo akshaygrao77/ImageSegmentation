@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from structures.heirarchical_seg_model import Hierarchical_SegModel,Fusion_SegModel
 
 class DiceLoss(nn.Module):
-    def __init__(self, smooth=1.0):
+    def __init__(self, smooth=1e-6):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
 
@@ -36,6 +36,19 @@ class DiceLoss(nn.Module):
         union = torch.sum(probs + targets_one_hot, dim=(2, 3))  # Calculate union
         dice_score = (2 * intersection + self.smooth) / (union + self.smooth)  # Dice score
         return 1 - dice_score.mean()  # Dice loss
+
+class IOULoss(nn.Module):
+    def __init__(self, smooth=1e-6):
+        super(IOULoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        probs = F.softmax(logits, dim=1)
+        targets_one_hot = F.one_hot(targets, num_classes=logits.size(1)).permute(0, 3, 1, 2).float()
+        intersection = torch.sum(probs * targets_one_hot, dim=(2, 3))  # Calculate intersection
+        union = torch.sum(probs + targets_one_hot, dim=(2, 3))  # Calculate union
+        iou_score = (intersection + self.smooth) / (union + self.smooth)  # Dice score
+        return 1 - iou_score.mean()  # Dice loss
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=1, gamma=2, reduction='mean'):
@@ -81,8 +94,12 @@ def combined_loss(logits, targets,loss_type, alpha=0.5):
         m_loss = DiceLoss()(logits, targets)
     elif(loss_type == 'focal'):
         m_loss = FocalLoss()(logits, targets)
+    elif(loss_type == 'iou'):
+        m_loss = IOULoss()(logits, targets)
     elif(loss_type == 'di_foc'):
         return (1-alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss()(logits, targets)
+    elif(loss_type == 'di_iou'):
+        return (1-alpha) * DiceLoss()(logits, targets) + alpha * IOULoss()(logits, targets)
     # Combined loss
     return (1-alpha) * ce_loss + alpha * m_loss
 
@@ -245,9 +262,9 @@ if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
-    # dice, focal , None , di_foc
+    # dice, focal , None , di_foc , iou , di_iou
     loss_type = None
-    alpha = 0.9
+    alpha = 0.5
 
     # None, 'hierarchical' , 'fusion'
     model_type = 'fusion'
@@ -256,7 +273,7 @@ if __name__ == '__main__':
     dataset = "Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
 
@@ -278,7 +295,7 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/contrast1/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_55.pt"
+    # start_net_path = "./checkpoints/Car_damages_dataset/fusi/default/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_19.pt"
     
     super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
 
