@@ -365,7 +365,8 @@ if __name__ == '__main__':
         wandb_config["start_net_path"] = start_net_path
         wandb_config["loss_type"] = loss_type
         wandb_config["alpha"] = alpha
-        wandb_config["model_type"]=model_type
+        wandb_config["model_type"] = model_type
+        wandb_config["super_segmodel_path"] = '' if model_type is None else super_segmodel_path
         wandb_run_name = ("" if model_type is None else model_type[:4]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
 
         if(continue_run_id is None):
