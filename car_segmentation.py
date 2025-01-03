@@ -295,8 +295,12 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/Car_damages_dataset/fusi/default/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_19.pt"
+    start_net_path = "./checkpoints/Car_damages_dataset/fusi/default/nvidia_segformer-b5-finetuned-cityscapes-1024-1024_ep_37.pt"
+
+    continue_run_id = None
+    continue_run_id = "18v5mbln"
     
+    superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
 
     start_epoch = 0
@@ -306,7 +310,7 @@ if __name__ == '__main__':
         superseg_ds = "Car_parts_dataset"
         superseg_dir = os.path.join(datadir,superseg_ds)
         superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
-        super_segmodel = get_segformermodel(len(superseg_id_to_color),pretrained_model_name)
+        super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
         super_segmodel,_,_,_ = get_model_from_path(super_segmodel,None,None,super_segmodel_path)
         if(model_type=='hierarchical'):
             model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
@@ -340,7 +344,7 @@ if __name__ == '__main__':
             superseg_ds = "Car_parts_dataset"
             superseg_dir = os.path.join(datadir,superseg_ds)
             superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
-            super_segmodel = get_segformermodel(len(superseg_id_to_color),pretrained_model_name)
+            super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
             super_segmodel,_,_,_ = get_model_from_path(super_segmodel,None,None,super_segmodel_path)
             if(model_type=='hierarchical'):
                 model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
@@ -374,11 +378,20 @@ if __name__ == '__main__':
         wandb_config["model_type"]=model_type
         wandb_run_name = ("" if model_type is None else model_type[:4]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
 
-        wandb.init(
-            project=f"{wand_project_name}",
-            name=f"{wandb_run_name}",
-            config=wandb_config,
-        )
+        if(continue_run_id is None):
+            wandb.init(
+                project=f"{wand_project_name}",
+                name=f"{wandb_run_name}",
+                config=wandb_config,
+            )
+        else:
+            wandb.init(
+                project=f"{wand_project_name}",
+                name=f"{wandb_run_name}",
+                config=wandb_config,
+                id=continue_run_id,  # ID of the previous run
+                resume="allow"     # Use "must" to enforce resumption or "allow" to create a new run if not found
+            )
 
     train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch,loss_type,alpha)
 
