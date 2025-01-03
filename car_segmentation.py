@@ -254,7 +254,7 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
                 "val_pixel_accuracy": val_pixel_accuracy,
                 "val_dice_coeff": val_dice_coeff,
                 "loss": train_loss
-            })
+            },step=epoch)
     
     return 
 
