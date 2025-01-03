@@ -21,10 +21,10 @@ def dice_coefficient(predictions, targets, num_classes):
         dice_scores.append(dice_score)
     return torch.tensor(dice_scores).mean()
 
-def get_model_from_path(model,optimizer, lr_scheduler, model_path):
+def get_model_from_path(model,chkpath):
     map_location = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Load checkpoint
-    checkpoint = torch.load(model_path, map_location=map_location)
+    checkpoint = torch.load(chkpath, map_location=map_location)
     
     # Load model state dict (strip `module.` for DataParallel models)
     state_dict = checkpoint['model_state_dict']
@@ -35,14 +35,28 @@ def get_model_from_path(model,optimizer, lr_scheduler, model_path):
     
     model.load_state_dict(state_dict)
     
+    epoch = checkpoint['epoch']  # Return the epoch if needed
+    
+    print(f"Model loaded from {chkpath}")
+    
+    return model, epoch
+
+def get_optimizers_from_path(optimizer, lr_scheduler, chkpath):
+    map_location = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Load checkpoint
+    checkpoint = torch.load(chkpath, map_location=map_location)
+    
     # Load optimizer and scheduler states
     if(optimizer is not None):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # Move optimizer state tensors to the correct device
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(map_location)
     if(lr_scheduler is not None):
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     
-    epoch = checkpoint['epoch']  # Return the epoch if needed
+    print(f"Optimizer and LR scheduler loaded from {chkpath}")
     
-    print(f"Checkpoint loaded from {model_path}")
-    
-    return model, optimizer, lr_scheduler, epoch
+    return optimizer, lr_scheduler

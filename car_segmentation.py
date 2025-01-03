@@ -254,7 +254,7 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
                 "val_pixel_accuracy": val_pixel_accuracy,
                 "val_dice_coeff": val_dice_coeff,
                 "loss": train_loss
-            },step=epoch)
+            })
     
     return 
 
@@ -273,7 +273,7 @@ if __name__ == '__main__':
     dataset = "Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
 
@@ -295,10 +295,10 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
 
     start_net_path = None
-    start_net_path = "./checkpoints/Car_damages_dataset/fusi/default/nvidia_segformer-b5-finetuned-cityscapes-1024-1024_ep_37.pt"
+    start_net_path = "./checkpoints/Car_damages_dataset/fusi/default/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_19.pt"
 
     continue_run_id = None
-    continue_run_id = "18v5mbln"
+    continue_run_id = "28z0hr4f"
     
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
@@ -311,12 +311,14 @@ if __name__ == '__main__':
         superseg_dir = os.path.join(datadir,superseg_ds)
         superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
         super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
-        super_segmodel,_,_,_ = get_model_from_path(super_segmodel,None,None,super_segmodel_path)
+        super_segmodel,_ = get_model_from_path(super_segmodel,super_segmodel_path)
         if(model_type=='hierarchical'):
             model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
         elif(model_type == 'fusion'):
             model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
-
+    
+    if(start_net_path is not None):
+        model,start_epoch = get_model_from_path(model,start_net_path)
     # Define optimizer and learning rate scheduler
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
@@ -336,21 +338,9 @@ if __name__ == '__main__':
         num_training_steps=num_training_steps,
         num_cycles=10
     )
+    
+    optimizer,lr_scheduler = get_optimizers_from_path(optimizer, lr_scheduler, start_net_path)
 
-    if(start_net_path is not None):
-        if(model_type is None):
-            model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
-        elif(model_type == 'hierarchical' or model_type == 'fusion'):
-            superseg_ds = "Car_parts_dataset"
-            superseg_dir = os.path.join(datadir,superseg_ds)
-            superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
-            super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
-            super_segmodel,_,_,_ = get_model_from_path(super_segmodel,None,None,super_segmodel_path)
-            if(model_type=='hierarchical'):
-                model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
-            elif(model_type == 'fusion'):
-                model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
-        model,optimizer,lr_scheduler,start_epoch = get_model_from_path(model,optimizer,lr_scheduler,start_net_path)
     device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.cuda.empty_cache()
     if device_str == 'cuda':
