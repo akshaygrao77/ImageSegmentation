@@ -350,7 +350,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_dir = os.path.join(os.path.join("./checkpoints/",dataset+("" if model_type is None else "/"+model_type[:4])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
+    model_save_dir = os.path.join(os.path.join("./checkpoints/no_norm/",dataset+("" if model_type is None else "/"+model_type[:4])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
@@ -367,7 +367,7 @@ if __name__ == '__main__':
         wandb_config["alpha"] = alpha
         wandb_config["model_type"] = model_type
         wandb_config["super_segmodel_path"] = '' if model_type is None else super_segmodel_path
-        wandb_run_name = ("" if model_type is None else model_type[:4]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
+        wandb_run_name = "no_norm_"+("" if model_type is None else model_type[:4]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
 
         if(continue_run_id is None):
             wandb.init(
