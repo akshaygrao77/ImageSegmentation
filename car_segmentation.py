@@ -140,7 +140,7 @@ def evaluate_model(model,num_labels,val_dataloader):
                 pixel_acc = pixel_accuracy(predicted, masks)
                 dice_coeff = dice_coefficient(predicted, masks, num_labels+1)
                 avg_pixel_acc += pixel_acc
-                avg_dice_coeff += dice_coeff
+                avg_dice_coeff += dice_coeff.item()
 
             # let's print loss and metrics every 100 batches
             if idx % 10 == 0:
@@ -263,7 +263,7 @@ if __name__ == '__main__':
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = None
+    loss_type = 'dice'
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion'
@@ -273,8 +273,8 @@ if __name__ == '__main__':
     dataset = "Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
-    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
 
     car_dir = os.path.join(datadir,dataset)
@@ -295,10 +295,10 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
 
     start_net_path = None
-    start_net_path = "./checkpoints/Car_damages_dataset/fusi/default/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_19.pt"
+    # start_net_path = "./checkpoints/Car_damages_dataset/fusi/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_34.pt"
 
     continue_run_id = None
-    continue_run_id = "28z0hr4f"
+    # continue_run_id = "5xdz3b15"
     
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
@@ -338,8 +338,8 @@ if __name__ == '__main__':
         num_training_steps=num_training_steps,
         num_cycles=10
     )
-    
-    optimizer,lr_scheduler = get_optimizers_from_path(optimizer, lr_scheduler, start_net_path)
+    if(start_net_path is not None):
+        optimizer,lr_scheduler = get_optimizers_from_path(optimizer, lr_scheduler, start_net_path)
 
     device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.cuda.empty_cache()

@@ -29,7 +29,7 @@ def hex_to_rgb(hex_code):
     hex_code = hex_code.lstrip('#')
     return tuple(int(hex_code[i:i+2], 16) for i in (0, 2, 4))
 
-def overlay_colored_mask(image, mask, id_to_color, alpha=0.5):
+def overlay_colored_mask(image, mask, id_to_color, alpha=0.5,is_normalize_image=True):
     """
     Overlay a segmentation mask on an image using colors defined in meta.json.
 
@@ -42,10 +42,11 @@ def overlay_colored_mask(image, mask, id_to_color, alpha=0.5):
     Returns:
         overlayed_image (numpy array): The image with the mask overlay.
     """
-
-    # Unnormalize the image
-    image = unnormalize_image(image)
-
+    if(is_normalize_image):
+        # Unnormalize the image
+        image = unnormalize_image(image)
+    else:
+        image = (image * 255).clip(0, 255).astype(np.uint8)
     # Ensure the image and mask dimensions match
     assert image.shape[:2] == mask.shape, "Image and mask dimensions do not match."
 
