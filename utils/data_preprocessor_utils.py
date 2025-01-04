@@ -19,8 +19,8 @@ def get_colormapping(coco_annotations_json,meta_json):
     
     return id_to_colormap
 
-def get_dataset(img_dir, ann_dir, is_train=False):
-    transforms_image,transforms_mask = get_transform(is_train)
+def get_dataset(img_dir, ann_dir, is_train=False,dataset=None):
+    transforms_image,transforms_mask = get_transform(is_train,dataset)
     if is_train:
         append_str = "train"
     else:

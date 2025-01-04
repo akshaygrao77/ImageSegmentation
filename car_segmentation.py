@@ -263,8 +263,8 @@ if __name__ == '__main__':
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'dice'
-    alpha = 0.5
+    loss_type = 'iou'
+    alpha = 0.9
 
     # None, 'hierarchical' , 'fusion'
     model_type = 'fusion'
@@ -288,17 +288,17 @@ if __name__ == '__main__':
     # Get the colormapping from labelID of segmentation classes to color
     car_id_to_color = get_colormapping(os.path.join(car_dir,coco_path),car_dir+"/meta.json")
 
-    train_car_dataset = get_dataset(car_imgs,car_anns,is_train=True)
-    val_car_dataset = get_dataset(car_imgs,car_anns)
+    train_car_dataset = get_dataset(car_imgs,car_anns,is_train=True,dataset=dataset)
+    val_car_dataset = get_dataset(car_imgs,car_anns,dataset=dataset)
 
     tr_cd_dataloader = DataLoader(train_car_dataset, batch_size=batch_size, shuffle=True,num_workers=8,pin_memory=True)
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/Car_damages_dataset/fusi/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_34.pt"
+    # start_net_path = "./checkpoints/high_aug_tnorm_/Car_damages_dataset/fusi/iou_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_21.pt"
 
     continue_run_id = None
-    # continue_run_id = "5xdz3b15"
+    # continue_run_id = "nr3ia5o1"
     
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
@@ -350,7 +350,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_dir = os.path.join(os.path.join("./checkpoints/no_norm/",dataset+("" if model_type is None else "/"+model_type[:4])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
+    model_save_dir = os.path.join(os.path.join("./checkpoints/high_aug_tnorm_/",dataset+("" if model_type is None else "/"+model_type[:4])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
@@ -367,7 +367,7 @@ if __name__ == '__main__':
         wandb_config["alpha"] = alpha
         wandb_config["model_type"] = model_type
         wandb_config["super_segmodel_path"] = '' if model_type is None else super_segmodel_path
-        wandb_run_name = "no_norm_"+("" if model_type is None else model_type[:4]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
+        wandb_run_name = "high_aug_tnorm_"+("" if model_type is None else model_type[:4]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
 
         if(continue_run_id is None):
             wandb.init(
