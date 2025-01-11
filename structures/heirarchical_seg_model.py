@@ -5,6 +5,30 @@ import torch.nn.functional as F
 from transformers.modeling_outputs import ModelOutput
 from typing import Optional
 
+def modify_segformer_output_channels(segmodel, new_output_channels):
+    """
+    Modify the SegFormer model to handle a different number of output channels.
+    
+    Args:
+        segmodel (SegformerForSemanticSegmentation): The pretrained SegFormer model object.
+        new_output_channels (int): The number of output channels for the modified model.
+    
+    Returns:
+        segmodel: The modified SegFormer model.
+    """
+    # Ensure the correct configuration for number of labels
+    segmodel.config.num_labels = new_output_channels
+
+    # Update the classifier layer in the decode head
+    segmodel.decode_head.classifier = torch.nn.Conv2d(
+        in_channels=segmodel.decode_head.classifier.in_channels,
+        out_channels=new_output_channels,
+        kernel_size=(1, 1)
+    )
+
+    return segmodel
+
+
 def modify_segformer_input_channels(segmodel, new_input_channels):
     """
     Modify the SegFormer model to handle a different number of input channels.

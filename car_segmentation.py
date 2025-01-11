@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from structures.heirarchical_seg_model import Hierarchical_SegModel,Fusion_SegModel
+from structures.heirarchical_seg_model import Hierarchical_SegModel,Fusion_SegModel,modify_segformer_output_channels
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
@@ -263,11 +263,11 @@ if __name__ == '__main__':
     wand_project_name = None
     wand_project_name="Car_Damage_Segmentation"
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'iou'
-    alpha = 0.9
+    loss_type = 'dice'
+    alpha = 0.5
 
-    # None, 'hierarchical' , 'fusion'
-    model_type = 'fusion'
+    # None, 'hierarchical' , 'fusion' , 'extend_tune'
+    model_type = 'extend_tune'
 
     # Car_damages_dataset, Car_parts_dataset
     dataset = "Car_damages_dataset"
@@ -282,7 +282,7 @@ if __name__ == '__main__':
     car_anns = os.path.join(car_dir,"split_annotations")
 
     # Important: BS below 16 causes performance degradation
-    batch_size = 16
+    batch_size = 18
     num_epochs = 100
 
     # Get the colormapping from labelID of segmentation classes to color
@@ -295,27 +295,32 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/high_aug_tnorm_/Car_damages_dataset/fusi/iou_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_21.pt"
+    # start_net_path = "./checkpoints/high_aug_tnorm_/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39/checkpoints/high_aug_tnorm_/Car_damages_dataset/fusi/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_3.pt"
 
     continue_run_id = None
-    # continue_run_id = "nr3ia5o1"
+    # continue_run_id = "167kw446"
     
-    superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
-    super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+    # superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    super_segmodel_path = "./checkpoints/high_aug_tnorm_/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
 
     start_epoch = 0
     if(model_type is None):
         model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
-    elif(model_type == 'hierarchical' or model_type == 'fusion'):
+        save_prefix = "./"
+    elif(model_type is not None):
         superseg_ds = "Car_parts_dataset"
         superseg_dir = os.path.join(datadir,superseg_ds)
         superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
         super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
         super_segmodel,_ = get_model_from_path(super_segmodel,super_segmodel_path)
+        save_prefix = super_segmodel_path[:super_segmodel_path.find('.pt')]+"/"
         if(model_type=='hierarchical'):
             model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
         elif(model_type == 'fusion'):
             model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
+        elif(model_type == 'extend_tune'):
+            model = modify_segformer_output_channels(super_segmodel,len(car_id_to_color)+1)
     
     if(start_net_path is not None):
         model,start_epoch = get_model_from_path(model,start_net_path)
@@ -350,7 +355,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_dir = os.path.join(os.path.join("./checkpoints/high_aug_tnorm_/",dataset+("" if model_type is None else "/"+model_type[:4])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
+    model_save_dir = os.path.join(os.path.join(save_prefix+"checkpoints/high_aug_tnorm_/",dataset+("" if model_type is None else "/"+model_type[:4])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
