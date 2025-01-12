@@ -266,15 +266,15 @@ if __name__ == '__main__':
     loss_type = 'dice'
     alpha = 0.5
 
-    # None, 'hierarchical' , 'fusion' , 'extend_tune'
-    model_type = 'extend_tune'
+    # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion'
+    model_type = 'ex_fusion'
 
     # Car_damages_dataset, Car_parts_dataset
     dataset = "Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
 
     car_dir = os.path.join(datadir,dataset)
@@ -282,7 +282,7 @@ if __name__ == '__main__':
     car_anns = os.path.join(car_dir,"split_annotations")
 
     # Important: BS below 16 causes performance degradation
-    batch_size = 18
+    batch_size = 16
     num_epochs = 100
 
     # Get the colormapping from labelID of segmentation classes to color
@@ -321,6 +321,13 @@ if __name__ == '__main__':
             model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
         elif(model_type == 'extend_tune'):
             model = modify_segformer_output_channels(super_segmodel,len(car_id_to_color)+1)
+        elif(model_type == 'ex_fusion'):
+            model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
+            superseg_model_name = pretrained_model_name
+            super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+            super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
+            model.model = get_model_from_path(super_segmodel,super_segmodel_path)[0]
+            model.model = modify_segformer_output_channels(model.model,len(car_id_to_color)+1)
     
     if(start_net_path is not None):
         model,start_epoch = get_model_from_path(model,start_net_path)
