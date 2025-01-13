@@ -19,6 +19,15 @@ def get_colormapping(coco_annotations_json,meta_json):
     
     return id_to_colormap
 
+def get_colorid_to_name(coco_annotations_json,meta_json):
+    coco = COCO(coco_annotations_json)
+    categories = coco.loadCats(coco.getCatIds())
+    id_name_map=dict()
+    for cat in categories:
+        id_name_map[cat["id"]] = cat["name"]
+    
+    return id_name_map
+
 def get_dataset(img_dir, ann_dir, is_train=False,dataset=None):
     transforms_image,transforms_mask = get_transform(is_train,dataset)
     if is_train:
