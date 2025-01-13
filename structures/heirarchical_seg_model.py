@@ -162,6 +162,40 @@ class Fusion_SegModel(nn.Module):
 
         return FusionSegOutput(loss=ce_loss, logits=output_logits)
 
+class GatingNetwork(nn.Module):
+    def __init__(self,num_labels_superseg):
+        super().__init__()
+        # Image processing branch
+        self.image_branch = nn.Sequential(
+            nn.Conv2d(3, 128, kernel_size=3, padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(128, 32, kernel_size=3, padding='same'),
+            nn.ReLU(),
+        )
+        
+        # Logits processing branch
+        self.logits_branch = nn.Sequential(
+            nn.Conv2d(num_labels_superseg, 128, kernel_size=3, padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(128, 32, kernel_size=3, padding='same'),
+            nn.ReLU(),
+        )
+
+        # Fusion layer
+        self.fusion_layer = nn.Sequential(
+            nn.Conv2d(32 + 32, 128, kernel_size=3, padding='same'),  # Fuse features
+            nn.ReLU(),
+            nn.Conv2d(128, 2, kernel_size=3, padding='same'),  # Two output channels
+        )
+    
+    def forward(self, image, logits):
+        image_features = self.image_branch(image)  # Features from image
+        logits_features = self.logits_branch(logits)  # Features from logits
+        combined_features = torch.cat([image_features, logits_features], dim=1)  # Concatenate
+        gate_weights = self.fusion_layer(combined_features)  # Output gate weights
+        return gate_weights
+
+
 class MOE_Fusion_SegModel(nn.Module):
     def __init__(self, supersegmodel, num_labels_superseg, num_labels, model_name, seed=2022, intermediate_channels=512):
         super().__init__()
@@ -192,11 +226,7 @@ class MOE_Fusion_SegModel(nn.Module):
         self.adjust_segformer_output = nn.Conv2d(num_labels, num_labels_superseg, kernel_size=1)
 
         # Gate mechanism to decide the contribution of each model
-        self.gate_network = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding='same'),  # Input is the image and output logits
-            nn.ReLU(),
-            nn.Conv2d(64, 2, kernel_size=3, padding='same')  # Output 2 channels for gate weights (one for each model)
-        )
+        self.gate_network = GatingNetwork(num_labels_superseg)
 
     def get_mask_from_supermodel(self, inp):
         with torch.no_grad():
@@ -214,9 +244,10 @@ class MOE_Fusion_SegModel(nn.Module):
         # Adjust SegFormer logits to match the supersegmodel's number of classes
         adjusted_segformer_logits = self.adjust_segformer_output(segformer_output.logits)  # Shape: (B, num_labels_superseg, H, W)
 
-        # Gating mechanism: compute gate weights using only the input image
-        gate_input = inp  # Just use the image as input for the gating mechanism
-        gate_weights = self.gate_network(gate_input)  # Shape: (B, 2, H, W)
+        # Upsample superseg_logits to match the SegFormer output size
+        upsampled_superseg_logits = F.interpolate(superseg_logits, size=labels.shape[-2:], mode="bilinear", align_corners=False)
+        # Gating mechanism: compute gate weights using the image and upsampled supersegmodel logits
+        gate_weights = self.gate_network(inp,upsampled_superseg_logits)  # Shape: (B, 2, H, W)
 
         # Normalize gate weights (optional: if needed, to ensure sum of weights is 1)
         gate_weights = torch.softmax(gate_weights, dim=1)  # Shape: (B, 2, H, W)
