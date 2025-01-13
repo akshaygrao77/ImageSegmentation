@@ -263,7 +263,7 @@ class MOE_Fusion_SegModel(nn.Module):
         )  # Shape: (B, num_labels_superseg, H, W)
 
         # Optional: Refine combined logits using a fusion layer
-        refined_logits = self.fusion_layer(torch.cat([combined_logits, superseg_logits], dim=1))
+        refined_logits = self.fusion_layer(torch.cat([combined_logits, adjusted_segformer_logits], dim=1))
 
         # Resample labels to match output size
         labels = F.interpolate(labels.unsqueeze(1).float(), size=refined_logits.shape[-2:], mode="nearest").squeeze(1).long()
