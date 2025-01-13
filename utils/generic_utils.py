@@ -41,6 +41,14 @@ def get_model_from_path(model,chkpath):
     
     return model, epoch
 
+def get_loraconfig_from_path(chkpath):
+    # Load the checkpoint
+    checkpoint = torch.load(chkpath)
+    if('lora_config' in checkpoint and checkpoint['lora_config'] is not None):
+        return  checkpoint['lora_config']
+    
+    return None
+
 def get_optimizers_from_path(optimizer, lr_scheduler, chkpath):
     map_location = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Load checkpoint

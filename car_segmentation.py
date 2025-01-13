@@ -8,6 +8,7 @@ from utils.data_preprocessor_utils import *
 from utils.visualize_utils import *
 from torch.utils.data import DataLoader
 
+from peft import LoraConfig, get_peft_model
 from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
 from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 from transformers import AdamW, get_scheduler
@@ -159,7 +160,7 @@ def evaluate_model(model,num_labels,val_dataloader):
 
     return avg_val_loss,metrics["mean_iou"],metrics["mean_accuracy"],avg_pixel_acc / len(val_dataloader), avg_dice_coeff / len(val_dataloader)
 
-def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0,loss_type=None,alpha=0.5):
+def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0,loss_type=None,alpha=0.5,lora_config=None):
     is_log_wandb = not(wand_project_name is None)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -230,7 +231,8 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'lr_scheduler': lr_scheduler.state_dict()
+            'lr_scheduler': lr_scheduler.state_dict(),
+            'lora_config':lora_config,
         }, model_path + "_ep_" + str(epoch) + ".pt")
 
         # Log validation performance
@@ -269,6 +271,18 @@ if __name__ == '__main__':
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion'
     model_type = 'ex_fusion'
 
+    # Wrap SegFormer with LoRA
+    lora_config = None
+    lora_config = LoraConfig(
+        task_type="TOKEN_CLASSIFICATION",  # Better aligned with segmentation tasks
+        r=8,  # Low-rank adaptation dimension
+        lora_alpha=16,  # Scaling factor
+        lora_dropout=0.1,  # Dropout for LoRA layers
+        target_modules=["query", "value"],  # Target attention layers
+        bias="none"  # No bias added
+    )
+
+
     # Car_damages_dataset, Car_parts_dataset
     dataset = "Car_damages_dataset"
 
@@ -303,6 +317,9 @@ if __name__ == '__main__':
     # superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     super_segmodel_path = "./checkpoints/high_aug_tnorm_/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
+    
+    if(start_net_path is not None):
+        lora_config = get_loraconfig_from_path(start_net_path)
 
     start_epoch = 0
     if(model_type is None):
@@ -321,6 +338,9 @@ if __name__ == '__main__':
             model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
         elif(model_type == 'extend_tune'):
             model = modify_segformer_output_channels(super_segmodel,len(car_id_to_color)+1)
+            if(lora_config is not None):
+                model = get_peft_model(model, lora_config)
+                model_type = 'lr'+model_type
         elif(model_type == 'ex_fusion'):
             model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
             superseg_model_name = pretrained_model_name
@@ -328,6 +348,10 @@ if __name__ == '__main__':
             super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
             model.model = get_model_from_path(super_segmodel,super_segmodel_path)[0]
             model.model = modify_segformer_output_channels(model.model,len(car_id_to_color)+1)
+            if(lora_config is not None):
+                model.model = get_peft_model(model.model, lora_config)
+                model_type = 'lr'+model_type
+
     
     if(start_net_path is not None):
         model,start_epoch = get_model_from_path(model,start_net_path)
@@ -362,7 +386,7 @@ if __name__ == '__main__':
         else:
             model = model.to(device)
     print(model)
-    model_save_dir = os.path.join(os.path.join(save_prefix+"checkpoints/high_aug_tnorm_/",dataset+("" if model_type is None else "/"+model_type[:4])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
+    model_save_dir = os.path.join(os.path.join(save_prefix+"checkpoints/high_aug_tnorm_/",dataset+("" if model_type is None else "/"+model_type[:7])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
@@ -378,8 +402,9 @@ if __name__ == '__main__':
         wandb_config["loss_type"] = loss_type
         wandb_config["alpha"] = alpha
         wandb_config["model_type"] = model_type
+        wandb_config["lora_config"]=lora_config
         wandb_config["super_segmodel_path"] = '' if model_type is None else super_segmodel_path
-        wandb_run_name = "high_aug_tnorm_"+("" if model_type is None else model_type[:4]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
+        wandb_run_name = "high_aug_tnorm_"+("" if model_type is None else model_type[:7]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
 
         if(continue_run_id is None):
             wandb.init(
@@ -396,6 +421,6 @@ if __name__ == '__main__':
                 resume="allow"     # Use "must" to enforce resumption or "allow" to create a new run if not found
             )
 
-    train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch,loss_type,alpha)
+    train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch,loss_type,alpha,lora_config)
 
 
