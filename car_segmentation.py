@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from structures.heirarchical_seg_model import Hierarchical_SegModel,Fusion_SegModel,modify_segformer_output_channels
+from structures.heirarchical_seg_model import Hierarchical_SegModel,Fusion_SegModel,modify_segformer_output_channels,MOE_Fusion_SegModel
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
@@ -268,19 +268,19 @@ if __name__ == '__main__':
     loss_type = 'dice'
     alpha = 0.5
 
-    # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion'
-    model_type = 'ex_fusion'
+    # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
+    model_type = 'moe_fusion'
 
     # Wrap SegFormer with LoRA
     lora_config = None
-    lora_config = LoraConfig(
-        task_type="TOKEN_CLASSIFICATION",  # Better aligned with segmentation tasks
-        r=8,  # Low-rank adaptation dimension
-        lora_alpha=16,  # Scaling factor
-        lora_dropout=0.1,  # Dropout for LoRA layers
-        target_modules=["query", "value"],  # Target attention layers
-        bias="none"  # No bias added
-    )
+    # lora_config = LoraConfig(
+    #     task_type="TOKEN_CLASSIFICATION",  # Better aligned with segmentation tasks
+    #     r=8,  # Low-rank adaptation dimension
+    #     lora_alpha=16,  # Scaling factor
+    #     lora_dropout=0.1,  # Dropout for LoRA layers
+    #     target_modules=["query", "value"],  # Target attention layers
+    #     bias="none"  # No bias added
+    # )
 
 
     # Car_damages_dataset, Car_parts_dataset
@@ -336,6 +336,8 @@ if __name__ == '__main__':
             model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
         elif(model_type == 'fusion'):
             model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
+        elif(model_type == 'moe_fusion'):
+            model = MOE_Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
         elif(model_type == 'extend_tune'):
             model = modify_segformer_output_channels(super_segmodel,len(car_id_to_color)+1)
             if(lora_config is not None):

@@ -161,3 +161,83 @@ class Fusion_SegModel(nn.Module):
         ce_loss = F.cross_entropy(output_logits, labels, reduction='mean')
 
         return FusionSegOutput(loss=ce_loss, logits=output_logits)
+
+class MOE_Fusion_SegModel(nn.Module):
+    def __init__(self, supersegmodel, num_labels_superseg, num_labels, model_name, seed=2022, intermediate_channels=512):
+        super().__init__()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.manual_seed(seed)
+
+        # Define fusion layer
+        self.fusion_layer = nn.Sequential(
+            nn.Conv2d(num_labels_superseg + num_labels_superseg, intermediate_channels, 3, padding='same'),
+            nn.BatchNorm2d(intermediate_channels),
+            nn.ReLU(),
+            nn.Conv2d(intermediate_channels, intermediate_channels // 2, 3, padding='same'),
+            nn.BatchNorm2d(intermediate_channels // 2),
+            nn.ReLU(),
+            nn.Conv2d(intermediate_channels // 2, num_labels, 3, padding='same')  # Final output
+        )
+
+        self.supersegmodel = supersegmodel
+        for param in self.supersegmodel.parameters():
+            param.requires_grad = False  # Freeze parameters
+
+        self.supersegmodel.eval()
+
+        # SegFormer model
+        self.model = SegformerForSemanticSegmentation.from_pretrained(model_name, num_labels=num_labels, ignore_mismatched_sizes=True)
+
+        # Adjust output layer to match supersegmodel's number of labels
+        self.adjust_segformer_output = nn.Conv2d(num_labels, num_labels_superseg, kernel_size=1)
+
+        # Gate mechanism to decide the contribution of each model
+        self.gate_network = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, padding='same'),  # Input is the image and output logits
+            nn.ReLU(),
+            nn.Conv2d(64, 2, kernel_size=3, padding='same')  # Output 2 channels for gate weights (one for each model)
+        )
+
+    def get_mask_from_supermodel(self, inp):
+        with torch.no_grad():
+            outputs = self.supersegmodel(inp)
+        return outputs.logits
+
+    def forward(self, inp, labels):
+        # Get logits from the super segmentation model
+        with torch.no_grad():
+            superseg_logits = self.get_mask_from_supermodel(inp)  # Shape: (B, num_labels_superseg, H, W)
+        
+        # Get logits from the SegFormer model
+        segformer_output = self.model(inp, labels)  # Shape: (B, num_labels, H, W)
+        
+        # Adjust SegFormer logits to match the supersegmodel's number of classes
+        adjusted_segformer_logits = self.adjust_segformer_output(segformer_output.logits)  # Shape: (B, num_labels_superseg, H, W)
+
+        # Gating mechanism: compute gate weights using only the input image
+        gate_input = inp  # Just use the image as input for the gating mechanism
+        gate_weights = self.gate_network(gate_input)  # Shape: (B, 2, H, W)
+
+        # Normalize gate weights (optional: if needed, to ensure sum of weights is 1)
+        gate_weights = torch.softmax(gate_weights, dim=1)  # Shape: (B, 2, H, W)
+        
+        # Resize gate weights to match the size of superseg_logits and segformer logits (H, W)
+        # Resize gate weights to match logits' spatial dimensions
+        gate_weights_resized = F.interpolate(gate_weights, size=superseg_logits.shape[-2:], mode="bilinear", align_corners=False)
+
+        # Combine logits using gating weights
+        combined_logits = (
+            gate_weights_resized[:, 0:1] * superseg_logits +  # Contribution from the super segmentation model
+            gate_weights_resized[:, 1:2] * adjusted_segformer_logits  # Contribution from the SegFormer model
+        )  # Shape: (B, num_labels_superseg, H, W)
+
+        # Optional: Refine combined logits using a fusion layer
+        refined_logits = self.fusion_layer(torch.cat([combined_logits, superseg_logits], dim=1))
+
+        # Resample labels to match output size
+        labels = F.interpolate(labels.unsqueeze(1).float(), size=refined_logits.shape[-2:], mode="nearest").squeeze(1).long()
+        
+        # Compute Cross-Entropy Loss
+        ce_loss = F.cross_entropy(refined_logits, labels, reduction='mean')
+
+        return FusionSegOutput(loss=ce_loss, logits=refined_logits)
