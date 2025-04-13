@@ -110,7 +110,7 @@ def get_segformermodel(num_labels,model_name):
 
     return model
 
-def evaluate_model(model,num_labels,val_dataloader):
+def evaluate_model(model,num_labels,val_dataloader,is_return_metric_obj=False):
     metric = evaluate.load("mean_iou")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -130,33 +130,27 @@ def evaluate_model(model,num_labels,val_dataloader):
             loss, logits = outputs.loss.mean(), outputs.logits
             total_loss += loss.item()
 
-            with torch.no_grad():
-                upsampled_logits = nn.functional.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
-                predicted = upsampled_logits.argmax(dim=1)
+            upsampled_logits = nn.functional.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
+            predicted = upsampled_logits.argmax(dim=1)
 
-                # note that the metric expects predictions + labels as numpy arrays
-                metric.add_batch(predictions=predicted.detach().cpu().numpy(), references=masks.detach().cpu().numpy())
+            # note that the metric expects predictions + labels as numpy arrays
+            metric.add_batch(predictions=predicted.detach().cpu().numpy(), references=masks.detach().cpu().numpy())
 
-                # Calculate Pixel Accuracy, Dice Coefficient, Mean Accuracy
-                pixel_acc = pixel_accuracy(predicted, masks)
-                dice_coeff = dice_coefficient(predicted, masks, num_labels+1)
-                avg_pixel_acc += pixel_acc
-                avg_dice_coeff += dice_coeff.item()
+            # Calculate Pixel Accuracy, Dice Coefficient, Mean Accuracy
+            pixel_acc = pixel_accuracy(predicted, masks)
+            dice_coeff = dice_coefficient(predicted, masks, num_labels+1)
+            avg_pixel_acc += pixel_acc
+            avg_dice_coeff += dice_coeff.item()
 
-            # let's print loss and metrics every 100 batches
-            if idx % 10 == 0:
-                # currently using _compute instead of compute
-                # see this issue for more info: https://github.com/huggingface/evaluate/pull/328#issuecomment-1286866576
-                metrics = metric._compute(
-                        predictions=predicted.cpu(),
-                        references=masks.cpu(),
-                        num_labels=num_labels+1,
-                        ignore_index=None,
-                        reduce_labels=False
-                    )
-
+        metrics = metric.compute(num_labels=num_labels + 1,
+                    ignore_index=None,
+                    reduce_labels=False)
+        
     avg_val_loss = total_loss / len(val_dataloader)
     print(f"Validation loss: {avg_val_loss} mean_iou :{metrics['mean_iou']}, mean_accuracy :{metrics['mean_accuracy']} val_pixel_accuracy: {avg_pixel_acc / len(val_dataloader)} val_dice_coeff : {avg_dice_coeff / len(val_dataloader)}")
+
+    if(is_return_metric_obj):
+        return avg_val_loss,metrics["mean_iou"],metrics["mean_accuracy"],avg_pixel_acc / len(val_dataloader), avg_dice_coeff / len(val_dataloader),metrics
 
     return avg_val_loss,metrics["mean_iou"],metrics["mean_accuracy"],avg_pixel_acc / len(val_dataloader), avg_dice_coeff / len(val_dataloader)
 
@@ -263,13 +257,13 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
 if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
-    wand_project_name="Car_Damage_Segmentation"
+    wand_project_name="new_Car_Damage_Segmentation"
     # dice, focal , None , di_foc , iou , di_iou
     loss_type = 'dice'
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
-    model_type = 'moe_fusion'
+    model_type = 'fusion'
 
     # Wrap SegFormer with LoRA
     lora_config = None
@@ -287,7 +281,9 @@ if __name__ == '__main__':
     dataset = "Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
 
@@ -305,8 +301,8 @@ if __name__ == '__main__':
     train_car_dataset = get_dataset(car_imgs,car_anns,is_train=True,dataset=dataset)
     val_car_dataset = get_dataset(car_imgs,car_anns,dataset=dataset)
 
-    tr_cd_dataloader = DataLoader(train_car_dataset, batch_size=batch_size, shuffle=True,num_workers=8,pin_memory=True)
-    val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=8,pin_memory=True)
+    tr_cd_dataloader = DataLoader(train_car_dataset, batch_size=batch_size, shuffle=True,num_workers=12,pin_memory=True)
+    val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=12,pin_memory=True)
 
     start_net_path = None
     # start_net_path = "./checkpoints/high_aug_tnorm_/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39/checkpoints/high_aug_tnorm_/Car_damages_dataset/fusi/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_3.pt"
@@ -314,9 +310,9 @@ if __name__ == '__main__':
     continue_run_id = None
     # continue_run_id = "167kw446"
     
-    # superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
-    superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
-    super_segmodel_path = "./checkpoints/high_aug_tnorm_/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
+    superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
     
     if(start_net_path is not None):
         lora_config = get_loraconfig_from_path(start_net_path)
