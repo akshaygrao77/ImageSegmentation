@@ -22,7 +22,8 @@ def get_transform(is_train,dataset=None):
     if is_train:
         # Separate transformations for image and mask
         transforms_image = Compose([
-            RandomResizedCrop(size=final_size, scale=(0.7, 1.0), ratio=(0.72,1.0), interpolation=InterpolationMode.BILINEAR),
+            # RandomResizedCrop(size=final_size, scale=(0.7, 1.0), ratio=(0.72,1.0), interpolation=InterpolationMode.BILINEAR),
+            transforms.Resize(final_size,interpolation=InterpolationMode.BILINEAR),
             RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation((-10,10),interpolation=InterpolationMode.BILINEAR),
             transforms.RandomAutocontrast(p=0.4),
@@ -31,7 +32,8 @@ def get_transform(is_train,dataset=None):
             Normalize(mean=mean, std=std)
         ])
         transforms_mask = transforms.Compose([
-            RandomResizedCrop(size=final_size, scale=(0.7, 1.0), ratio=(0.72,1.0), interpolation=InterpolationMode.NEAREST),
+            # RandomResizedCrop(size=final_size, scale=(0.7, 1.0), ratio=(0.72,1.0), interpolation=InterpolationMode.NEAREST),
+            transforms.Resize(final_size,interpolation=InterpolationMode.NEAREST),
             RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation((-10,10),interpolation=InterpolationMode.NEAREST),
             mask_to_tensor

@@ -34,9 +34,9 @@ def get_dataset(img_dir, ann_dir, is_train=False,dataset=None):
         append_str = "train"
     else:
         append_str = "val"
-    
+
     dataset = COCOSegmentationDataset(
-        root=os.path.join(img_dir, append_str),
+        root=[os.path.join(each_img_dir, append_str) for each_img_dir in img_dir],
         ann_file=os.path.join(ann_dir, append_str + ".json"),
         transforms_image=transforms_image,
         transforms_mask=transforms_mask
@@ -48,5 +48,7 @@ def get_cocopath(dataset):
         coco_path = "coco_damage_annotations.json"
     elif(dataset == "Car_parts_dataset"):
         coco_path = "coco_parts_annotations.json"
+    elif(dataset == "CarDNN_Kaggle_merged_Car_damages_dataset"):
+        coco_path = "val.json"
 
     return coco_path
