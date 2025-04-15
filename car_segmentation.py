@@ -4,6 +4,7 @@ from torch import nn
 import numpy as np
 import json
 from structures.dataset_structure import COCOSegmentationDataset
+from structures.heirarchical_seg_model import Fusion_SegModel, Hierarchical_SegModel, MOE_Fusion_SegModel, modify_segformer_output_channels
 from utils.data_preprocessor_utils import *
 from utils.visualize_utils import *
 from torch.utils.data import DataLoader
@@ -17,15 +18,10 @@ from tqdm import tqdm
 import evaluate
 import wandb
 import torch.nn.functional as F
-from sklearn.metrics import accuracy_score,confusion_matrix
+from sklearn.metrics import accuracy_score, confusion_matrix
 
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
-from structures.heirarchical_seg_model import Hierarchical_SegModel,Fusion_SegModel,modify_segformer_output_channels,MOE_Fusion_SegModel
-
-# from accelerate import Accelerator
+from accelerate import Accelerator
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
@@ -59,20 +55,20 @@ class FocalLoss(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
-    
+
     def forward(self, logits, targets):
         # Apply softmax to logits to get predicted probabilities (logits -> probabilities)
         probs = F.softmax(logits, dim=1)
-        
+
         # Select the probabilities corresponding to the true class
         target_probs = probs.gather(1, targets.unsqueeze(1))  # Shape: (B, 1)
-        
+
         # Compute Cross-Entropy Loss (for the true class)
         ce_loss = F.cross_entropy(logits, targets, reduction='none')
-        
+
         # Compute Focal Loss
         focal_loss = self.alpha * (1 - target_probs) ** self.gamma * ce_loss
-        
+
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
@@ -80,7 +76,7 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss
 
-def combined_loss(logits, targets,loss_type, alpha=0.5):
+def combined_loss(logits, targets, loss_type, alpha=0.5):
     """
     Combined Cross-Entropy and Dice Loss with proper upsampling of logits.
     """
@@ -88,97 +84,129 @@ def combined_loss(logits, targets,loss_type, alpha=0.5):
     # Downsample targets to match the input image size
     # Important: Downsampling targets for loss calculation seems to be better compared to upsampling logits bcoz upsampling logits can introduce artifacts
     targets = F.interpolate(targets.unsqueeze(1).float(), size=logits.shape[-2:], mode="nearest").squeeze(1).long()
-    
+
     # Cross-Entropy Loss
     ce_loss = F.cross_entropy(logits, targets, reduction='mean')
-    m_loss = 1/(1-alpha)
-    if(loss_type == 'dice'):
+    m_loss = 1 / (1 - alpha)
+    if loss_type == 'dice':
         # Dice Loss
         m_loss = DiceLoss()(logits, targets)
-    elif(loss_type == 'focal'):
+    elif loss_type == 'focal':
         m_loss = FocalLoss()(logits, targets)
-    elif(loss_type == 'iou'):
+    elif loss_type == 'iou':
         m_loss = IOULoss()(logits, targets)
-    elif(loss_type == 'di_foc'):
-        return (1-alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss()(logits, targets)
-    elif(loss_type == 'di_iou'):
-        return (1-alpha) * DiceLoss()(logits, targets) + alpha * IOULoss()(logits, targets)
+    elif loss_type == 'di_foc':
+        return (1 - alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss()(logits, targets)
+    elif loss_type == 'di_iou':
+        return (1 - alpha) * DiceLoss()(logits, targets) + alpha * IOULoss()(logits, targets)
     # Combined loss
-    return (1-alpha) * ce_loss + alpha * m_loss
+    return (1 - alpha) * ce_loss + alpha * m_loss
 
-def get_segformermodel(num_labels,model_name):
+def get_segformermodel(num_labels, model_name):
     # nvidia/segformer-b5-finetuned-cityscapes-1024-1024
-    model = SegformerForSemanticSegmentation.from_pretrained(model_name,num_labels=num_labels+1,ignore_mismatched_sizes=True)
+    model = SegformerForSemanticSegmentation.from_pretrained(model_name, num_labels=num_labels + 1,
+                                                           ignore_mismatched_sizes=True)
 
     return model
 
-def evaluate_model(model,num_labels,val_dataloader,is_return_metric_obj=False):
+def evaluate_model(model, num_labels, val_dataloader, accelerator=None, is_return_metric_obj=False):
     metric = evaluate.load("mean_iou")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Evaluation after each epoch
     model.eval()
     total_loss = 0
+
+    pixel_acc_total = 0.0
+    dice_coeff_total = 0.0
+    sample_count = 0
+    avg_val_loss = 0
     avg_pixel_acc = 0
     avg_dice_coeff = 0
-    with torch.no_grad():
-        for idx,batch in enumerate(tqdm(val_dataloader,desc=f"Evaluating")):
-            images, masks = batch
-            images = images.to(device)
-            masks = masks.squeeze(1).to(device)
 
+    for idx, batch in enumerate(tqdm(val_dataloader, desc="Evaluating", disable=accelerator is not None and not accelerator.is_main_process)):
+        images, masks = batch
+        masks = masks.squeeze(1)
+
+        if accelerator is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            images = images.to(device)
+            masks = masks.to(device)
+
+        with torch.no_grad():
             outputs = model(images, labels=masks)
             loss, logits = outputs.loss.mean(), outputs.logits
             total_loss += loss.item()
 
-            upsampled_logits = nn.functional.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
+            upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
             predicted = upsampled_logits.argmax(dim=1)
 
-            # note that the metric expects predictions + labels as numpy arrays
-            metric.add_batch(predictions=predicted.detach().cpu().numpy(), references=masks.detach().cpu().numpy())
+            if accelerator is not None:
+                predicted = accelerator.gather(predicted).cpu()
+                masks = accelerator.gather(masks).cpu()
+            else:
+                predicted = predicted.cpu()
+                masks = masks.cpu()
 
-            # Calculate Pixel Accuracy, Dice Coefficient, Mean Accuracy
-            pixel_acc = pixel_accuracy(predicted, masks)
-            dice_coeff = dice_coefficient(predicted, masks, num_labels+1)
-            avg_pixel_acc += pixel_acc
-            avg_dice_coeff += dice_coeff.item()
+            # Only main process adds to metric
+            if accelerator is None or accelerator.is_main_process:
+                preds_np = predicted.detach().numpy()
+                refs_np = masks.detach().numpy()
+                metric.add_batch(predictions=preds_np, references=refs_np)
 
-        metrics = metric.compute(num_labels=num_labels + 1,
-                    ignore_index=None,
-                    reduce_labels=False)
-        
-    avg_val_loss = total_loss / len(val_dataloader)
-    # if accelerator.is_main_process:
-    print(f"Validation loss: {avg_val_loss} mean_iou :{metrics['mean_iou']}, mean_accuracy :{metrics['mean_accuracy']} val_pixel_accuracy: {avg_pixel_acc / len(val_dataloader)} val_dice_coeff : {avg_dice_coeff / len(val_dataloader)}")
+                pixel_acc_total += pixel_accuracy(predicted, masks) * predicted.shape[0]
+                dice_coeff_total += dice_coefficient(predicted, masks, num_labels + 1) * predicted.shape[0]
+                sample_count += predicted.shape[0]
 
-    if(is_return_metric_obj):
-        return avg_val_loss,metrics["mean_iou"],metrics["mean_accuracy"],avg_pixel_acc / len(val_dataloader), avg_dice_coeff / len(val_dataloader),metrics
+    # Compute metrics on main process
+    if accelerator is None or accelerator.is_main_process:
+        metrics = metric.compute(num_labels=num_labels + 1, ignore_index=None, reduce_labels=False)
+        avg_val_loss = total_loss / len(val_dataloader)
 
-    return avg_val_loss,metrics["mean_iou"],metrics["mean_accuracy"],avg_pixel_acc / len(val_dataloader), avg_dice_coeff / len(val_dataloader)
+        avg_pixel_acc = pixel_acc_total / sample_count if sample_count > 0 else 0.0
+        avg_dice_coeff = dice_coeff_total / sample_count if sample_count > 0 else 0.0
 
-def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0,loss_type=None,alpha=0.5,lora_config=None):
-    is_log_wandb = not(wand_project_name is None)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # accelerator = Accelerator(log_with="wandb")
-    # if accelerator.is_main_process:
-    #     print(f"accelerator.device :{accelerator.device } accelerator.state:{accelerator.state}")
+        print(
+            f"\nValidation loss: {avg_val_loss:.4f}, mean_iou: {metrics['mean_iou']:.4f}, "
+            f"mean_accuracy: {metrics['mean_accuracy']:.4f}, pixel_accuracy: {avg_pixel_acc:.4f}, "
+            f"dice_coeff: {avg_dice_coeff:.4f}"
+        )
+        per_class_iou = metrics.get('per_category_iou', None)
+        if per_class_iou is not None:
+            for cls_id, iou in enumerate(per_class_iou):
+                print(f"Class {cls_id} IoU: {iou:.4f}")
 
-    # model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
-    #     model, optimizer, train_dataloader, val_dataloader, lr_scheduler
-    # )
+
+        if is_return_metric_obj:
+            return avg_val_loss, metrics["mean_iou"], metrics["mean_accuracy"], avg_pixel_acc, avg_dice_coeff, metrics
+
+        return avg_val_loss, metrics["mean_iou"], metrics["mean_accuracy"], avg_pixel_acc, avg_dice_coeff
+    
+    if is_return_metric_obj:
+        return 0.,0.,0.,0.,0.,0.
+    return 0.,0.,0.,0.,0.
+
+def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_dataloader, val_dataloader,
+                model_path, accelerator=None, wand_project_name=None, start_epoch=0, loss_type=None, alpha=0.5,
+                lora_config=None):
+    is_log_wandb = not (wand_project_name is None)
+    if (accelerator is None):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, val_dataloader, lr_scheduler
+        )
 
     # Training loop
     for epoch in range(start_epoch, num_epochs):
         model.train()
-        progress_bar = tqdm(train_dataloader, desc=f"Training Epoch {epoch+1}/{num_epochs}")
+        progress_bar = tqdm(train_dataloader, desc=f"Training Epoch {epoch + 1}/{num_epochs}",
+                            disable=not (accelerator is None or accelerator.is_main_process))  # Only show progress bar on main process
         total_loss = 0
         metric = evaluate.load("mean_iou")
         for idx, batch in enumerate(progress_bar):
             images, masks = batch
             masks = masks.squeeze(1)
-            images = images.to(device)
-            masks = masks.to(device)
+            if (accelerator is None):
+                images = images.to(device)
+                masks = masks.to(device)
 
             assert masks.max() <= num_labels, f"Mask contains invalid class index: {masks.max()}"
             assert masks.min() >= 0, "Mask contains negative class indices"
@@ -188,31 +216,31 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
             outputs = model(images, labels=masks)
             loss, logits = outputs.loss.mean(), outputs.logits
 
-            if(loss_type is not None):
-                loss = combined_loss(logits, masks,loss_type,alpha)
+            if (loss_type is not None):
+                loss = combined_loss(logits, masks, loss_type, alpha)
 
             # Backward pass
-            loss.backward()
-            # accelerator.backward(loss)
+            if (accelerator is None):
+                loss.backward()
+            else:
+                accelerator.backward(loss)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
 
             # Evaluation metrics
             with torch.no_grad():
-                upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
+                upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear",
+                                                align_corners=False)
                 predicted = upsampled_logits.argmax(dim=1)
                 # print(f"Logits shape after interpolation: {upsampled_logits.shape}, Predicted shape: {predicted.shape}")
 
                 # Ensure predicted is the same shape as masks (batch_size, height, width)
                 assert predicted.shape == masks.shape, "Predicted shape doesn't match masks shape"
 
-                # Add predictions and ground truth to metric (for Mean IoU)
-                metric.add_batch(predictions=predicted.detach().cpu().numpy(), references=masks.detach().cpu().numpy())
-            
             total_loss += loss.item()
             # Log metrics every 10 batches
-            if idx % 10 == 0:
+            if idx % 10 == 0 and (accelerator is None or accelerator.is_main_process):
                 metrics = metric._compute(
                     predictions=predicted.cpu(),
                     references=masks.cpu(),
@@ -223,31 +251,35 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
                 del predicted, masks
                 torch.cuda.empty_cache()
 
-            # Update progress bar
-            progress_bar.set_postfix({
-                "loss": loss.item(),
-                "mean_iou": metrics["mean_iou"],
-                "mean_accuracy": metrics["mean_accuracy"]
-            })
+                # Update progress bar
+                progress_bar.set_postfix({
+                    "loss": loss.item(),
+                    "mean_iou": metrics["mean_iou"],
+                    "mean_accuracy": metrics["mean_accuracy"]
+                })
 
-        # if accelerator.is_main_process:  # Only save on the main process
-        #     unwrapped_model = accelerator.unwrap_model(model)
-        # Save model and optimizer state
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'lr_scheduler': lr_scheduler.state_dict(),
-            'lora_config':lora_config,
-        }, model_path + "_ep_" + str(epoch) + ".pt")
+        if (accelerator is None or accelerator.is_main_process):  # Only save on the main process
+            unwrapped_model = model
+            if (accelerator is not None):
+                unwrapped_model = accelerator.unwrap_model(model)
+            # Save model and optimizer state
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': unwrapped_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'lora_config': lora_config,
+            }, model_path + "_ep_" + str(epoch) + ".pt")
 
         # Log validation performance
         current_lr = optimizer.param_groups[0]['lr']
         scheduler_type = str(lr_scheduler)
-        train_loss, train_iou, train_acc,train_pixel_accuracy,train_dice_coeff = evaluate_model(model, num_labels, train_dataloader)
-        val_loss, val_iou, val_acc,val_pixel_accuracy,val_dice_coeff = evaluate_model(model, num_labels, val_dataloader)
+        train_loss, train_iou, train_acc, train_pixel_accuracy, train_dice_coeff = evaluate_model(
+            model, num_labels, train_dataloader, accelerator)
+        val_loss, val_iou, val_acc, val_pixel_accuracy, val_dice_coeff = evaluate_model(model, num_labels,
+                                                                                       val_dataloader, accelerator)
 
-        if is_log_wandb:
+        if is_log_wandb and (accelerator is None or accelerator.is_main_process):
             wandb.log({
                 "current_epoch": epoch,
                 'learning_rate': current_lr,
@@ -263,13 +295,13 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
                 "val_dice_coeff": val_dice_coeff,
                 "loss": train_loss
             })
-    
-    return 
+
+    return
 
 if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
-    wand_project_name="new_Car_Damage_Segmentation"
+    wand_project_name = "new_Car_Damage_Segmentation"
     # dice, focal , None , di_foc , iou , di_iou
     loss_type = 'dice'
     alpha = 0.5
@@ -288,10 +320,8 @@ if __name__ == '__main__':
     #     bias="none"  # No bias added
     # )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     # Car_damages_dataset, Car_parts_dataset , CarDNN_Kaggle_merged_Car_damages_dataset
-    dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
+    dataset = "Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
@@ -299,90 +329,101 @@ if __name__ == '__main__':
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
     pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
-    tmp_dir = os.path.join(datadir,dataset)
+    tmp_dir = os.path.join(datadir, dataset)
 
-    if(dataset != "CarDNN_Kaggle_merged_Car_damages_dataset"):
+    if (dataset != "CarDNN_Kaggle_merged_Car_damages_dataset"):
         car_dirs = [tmp_dir]
-    elif(dataset == "CarDNN_Kaggle_merged_Car_damages_dataset"):
-        car_dirs = [os.path.join(datadir,"Car_damages_dataset"),os.path.join("./data/CarDD_release/","CarDD_COCO/")]
-    
+    elif (dataset == "CarDNN_Kaggle_merged_Car_damages_dataset"):
+        car_dirs = [os.path.join(datadir, "Car_damages_dataset"),
+                    os.path.join("./data/CarDD_release/", "CarDD_COCO/")]
+
     car_imgs = []
     for car_dir in car_dirs:
-        car_imgs.append(os.path.join(car_dir,"split_dataset"))
-    car_anns = (os.path.join(tmp_dir,"split_annotations"))
+        car_imgs.append(os.path.join(car_dir, "split_dataset"))
+    car_anns = (os.path.join(tmp_dir, "split_annotations"))
 
-    # accelerator = Accelerator(log_with="wandb")
+    accelerator = None
+    # accelerator = Accelerator(mixed_precision='fp16')
+    accelerator = Accelerator()
 
     # Important: BS below 16 causes performance degradation
-    # batch_size = 16 //accelerator.num_processes
     batch_size = 16
     num_epochs = 40
 
+    if(accelerator is not None):
+        print(f"accelerator.num_processes:{accelerator.num_processes}, accelerator.state:   {accelerator.state}")
+        batch_size = batch_size //accelerator.num_processes
+
     # Get the colormapping from labelID of segmentation classes to color
-    car_id_to_color = get_colormapping(os.path.join(tmp_dir,coco_path),tmp_dir+"/meta.json")
+    car_id_to_color = get_colormapping(os.path.join(tmp_dir, coco_path), tmp_dir + "/meta.json")
 
-    train_car_dataset = get_dataset(car_imgs,car_anns,is_train=True,dataset=dataset)
-    val_car_dataset = get_dataset(car_imgs,car_anns,dataset=dataset)
+    train_car_dataset = get_dataset(car_imgs, car_anns, is_train=True, dataset=dataset)
+    val_car_dataset = get_dataset(car_imgs, car_anns, dataset=dataset)
 
-    tr_cd_dataloader = DataLoader(train_car_dataset, batch_size=batch_size, shuffle=True,num_workers=12,pin_memory=True)
-    val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=12,pin_memory=True)
+    tr_cd_dataloader = DataLoader(train_car_dataset, batch_size=batch_size, shuffle=True, num_workers=12,
+                                  pin_memory=True)
+    val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=12, pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/fusion/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_0.pt"
+    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/Car_damages_dataset/fusion/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_0.pt"
 
     continue_run_id = None
-    # continue_run_id = "ykm2ec8t"
-    
+    # continue_run_id = "17kecjz4"
+
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
-    
-    if(start_net_path is not None):
+
+    if (start_net_path is not None):
         lora_config = get_loraconfig_from_path(start_net_path)
 
     start_epoch = 0
-    if(model_type is None):
-        model = get_segformermodel(len(car_id_to_color),pretrained_model_name)
+    if (model_type is None):
+        model = get_segformermodel(len(car_id_to_color), pretrained_model_name)
         save_prefix = "./"
-    elif(model_type is not None):
+    elif (model_type is not None):
         superseg_ds = "Car_parts_dataset"
-        superseg_dir = os.path.join(datadir,superseg_ds)
-        superseg_id_to_color = get_colormapping(os.path.join(superseg_dir,get_cocopath(superseg_ds)),superseg_dir+"/meta.json")
-        super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
-        super_segmodel,_ = get_model_from_path(super_segmodel,super_segmodel_path)
-        save_prefix = super_segmodel_path[:super_segmodel_path.find('.pt')]+"/"
-        if(model_type=='hierarchical'):
-            model = Hierarchical_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
-        elif(model_type == 'fusion'):
-            model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
-        elif(model_type == 'moe_fusion'):
-            model = MOE_Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
-        elif(model_type == 'extend_tune'):
-            model = modify_segformer_output_channels(super_segmodel,len(car_id_to_color)+1)
-            if(lora_config is not None):
+        superseg_dir = os.path.join(datadir, superseg_ds)
+        superseg_id_to_color = get_colormapping(os.path.join(superseg_dir, get_cocopath(superseg_ds)),
+                                                superseg_dir + "/meta.json")
+        super_segmodel = get_segformermodel(len(superseg_id_to_color), superseg_model_name)
+        super_segmodel, _ = get_model_from_path(super_segmodel, super_segmodel_path)
+        save_prefix = super_segmodel_path[:super_segmodel_path.find('.pt')] + "/"
+        if (model_type == 'hierarchical'):
+            model = Hierarchical_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
+                                          len(car_id_to_color) + 1, pretrained_model_name)
+        elif (model_type == 'fusion'):
+            model = Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
+                                    len(car_id_to_color) + 1, pretrained_model_name)
+        elif (model_type == 'moe_fusion'):
+            model = MOE_Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
+                                        len(car_id_to_color) + 1, pretrained_model_name)
+        elif (model_type == 'extend_tune'):
+            model = modify_segformer_output_channels(super_segmodel, len(car_id_to_color) + 1)
+            if (lora_config is not None):
                 model = get_peft_model(model, lora_config)
-                model_type = 'lr'+model_type
-        elif(model_type == 'ex_fusion'):
-            model = Fusion_SegModel(super_segmodel,len(superseg_id_to_color)+1,len(car_id_to_color)+1,pretrained_model_name)
+                model_type = 'lr' + model_type
+        elif (model_type == 'ex_fusion'):
+            model = Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
+                                    len(car_id_to_color) + 1, pretrained_model_name)
             superseg_model_name = pretrained_model_name
             super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
-            super_segmodel = get_segformermodel(len(superseg_id_to_color),superseg_model_name)
-            model.model = get_model_from_path(super_segmodel,super_segmodel_path)[0]
-            model.model = modify_segformer_output_channels(model.model,len(car_id_to_color)+1)
-            if(lora_config is not None):
+            super_segmodel = get_segformermodel(len(superseg_id_to_color), superseg_model_name)
+            model.model = get_model_from_path(super_segmodel, super_segmodel_path)[0]
+            model.model = modify_segformer_output_channels(model.model, len(car_id_to_color) + 1)
+            if (lora_config is not None):
                 model.model = get_peft_model(model.model, lora_config)
-                model_type = 'lr'+model_type
+                model_type = 'lr' + model_type
 
-    
-    if(start_net_path is not None):
-        model,start_epoch = get_model_from_path(model,start_net_path)
+    if (start_net_path is not None):
+        model, start_epoch = get_model_from_path(model, start_net_path)
     # Define optimizer and learning rate scheduler
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
     # Set up the learning rate scheduler
     num_training_steps = num_epochs * len(tr_cd_dataloader)
-    # if accelerator.is_main_process:
-    print("num_training_steps ",num_training_steps,num_epochs * len(tr_cd_dataloader),car_id_to_color)
+    if (accelerator is None or accelerator.is_main_process):
+        print("num_training_steps ", num_training_steps, num_epochs * len(tr_cd_dataloader), car_id_to_color)
     # lr_scheduler = get_scheduler(
     #     name="linear",
     #     optimizer=optimizer,
@@ -399,21 +440,26 @@ if __name__ == '__main__':
     if(start_net_path is not None):
         optimizer,lr_scheduler = get_optimizers_from_path(optimizer, lr_scheduler, start_net_path)
 
-    device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.cuda.empty_cache()
-    if device_str == 'cuda':
-        if(torch.cuda.device_count() > 1):
-            print("Parallelizing model")
-            model = torch.nn.DataParallel(model).cuda()
-        else:
-            model = model.to(device)
-    # if accelerator.is_main_process:
-    print(model)
-    model_save_dir = os.path.join(os.path.join(save_prefix+"new_checkpoints/high_aug_tnorm_/",dataset+("" if model_type is None else "/"+model_type[:7])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
+    if(accelerator is None):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device_str == 'cuda':
+            if(torch.cuda.device_count() > 1):
+                print("Parallelizing model")
+                model = torch.nn.DataParallel(model).cuda()
+            else:
+                model = model.to(device)
+    if (accelerator is None or accelerator.is_main_process):
+        print(model)
+    model_save_dir = os.path.join(
+        os.path.join(save_prefix + "new_checkpoints/high_aug_tnorm_/",
+                     dataset + ("" if model_type is None else "/" + model_type[:7])),
+        "default" if loss_type is None else (loss_type + "_" + str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
-    model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
-    is_log_wandb = not(wand_project_name is None)
-    if(is_log_wandb):
+    model_save_path = os.path.join(model_save_dir, pretrained_model_name.replace("/", "_"))
+    is_log_wandb = not (wand_project_name is None)
+    if (is_log_wandb and (accelerator is None or accelerator.is_main_process)):
         wandb_config = dict()
         wandb_config["optimizer"] = optimizer
         wandb_config["final_model_save_path"] = model_save_path
@@ -425,9 +471,15 @@ if __name__ == '__main__':
         wandb_config["loss_type"] = loss_type
         wandb_config["alpha"] = alpha
         wandb_config["model_type"] = model_type
-        wandb_config["lora_config"]=lora_config
+        wandb_config["lora_config"] = lora_config
         wandb_config["super_segmodel_path"] = '' if model_type is None else super_segmodel_path
-        wandb_run_name = "high_aug_tnorm_"+("" if model_type is None else model_type[:7]+"_")+("DMG" if "damage" in dataset else "PRT") +"_"+ pretrained_model_name[pretrained_model_name.find("segformer")+len("segformer")+1:pretrained_model_name.find("finetun")-1]+"_"+pretrained_model_name[pretrained_model_name.find("finetun")+len("finetuned")+1:][:4]+ "_"+("def" if loss_type is None else loss_type+"_"+str(alpha))
+        wandb_run_name = "high_aug_tnorm_" + ("" if model_type is None else model_type[:7] + "_") + (
+            "DMG" if "damage" in dataset else "PRT") + "_" + \
+                         pretrained_model_name[
+                         pretrained_model_name.find("segformer") + len("segformer") + 1:pretrained_model_name.find(
+                             "finetun") - 1] + "_" + \
+                         pretrained_model_name[pretrained_model_name.find("finetun") + len("finetuned") + 1:][:4] + \
+                         "_" + ("def" if loss_type is None else loss_type + "_" + str(alpha))
 
         if(continue_run_id is None):
             wandb.init(
@@ -448,10 +500,11 @@ if __name__ == '__main__':
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     non_trainable_params = total_params - trainable_params
 
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Non-trainable parameters: {non_trainable_params:,}")
+    if (accelerator is None or accelerator.is_main_process):
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Non-trainable parameters: {non_trainable_params:,}")
 
-    train_model(model,optimizer,lr_scheduler,len(car_id_to_color),num_epochs,tr_cd_dataloader,val_cd_dataloader,model_save_path,wand_project_name,start_epoch,loss_type,alpha,lora_config)
-
-
+    train_model(model, optimizer, lr_scheduler, len(car_id_to_color), num_epochs, tr_cd_dataloader,
+                val_cd_dataloader, model_save_path, accelerator, wand_project_name, start_epoch,
+                loss_type, alpha, lora_config)
