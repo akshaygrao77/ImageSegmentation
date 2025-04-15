@@ -25,6 +25,8 @@ import torch.nn.functional as F
 
 from structures.heirarchical_seg_model import Hierarchical_SegModel,Fusion_SegModel,modify_segformer_output_channels,MOE_Fusion_SegModel
 
+# from accelerate import Accelerator
+
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
         super(DiceLoss, self).__init__()
@@ -147,6 +149,7 @@ def evaluate_model(model,num_labels,val_dataloader,is_return_metric_obj=False):
                     reduce_labels=False)
         
     avg_val_loss = total_loss / len(val_dataloader)
+    # if accelerator.is_main_process:
     print(f"Validation loss: {avg_val_loss} mean_iou :{metrics['mean_iou']}, mean_accuracy :{metrics['mean_accuracy']} val_pixel_accuracy: {avg_pixel_acc / len(val_dataloader)} val_dice_coeff : {avg_dice_coeff / len(val_dataloader)}")
 
     if(is_return_metric_obj):
@@ -157,19 +160,25 @@ def evaluate_model(model,num_labels,val_dataloader,is_return_metric_obj=False):
 def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloader,val_dataloader,model_path,wand_project_name=None,start_epoch=0,loss_type=None,alpha=0.5,lora_config=None):
     is_log_wandb = not(wand_project_name is None)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # accelerator = Accelerator(log_with="wandb")
+    # if accelerator.is_main_process:
+    #     print(f"accelerator.device :{accelerator.device } accelerator.state:{accelerator.state}")
+
+    # model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+    #     model, optimizer, train_dataloader, val_dataloader, lr_scheduler
+    # )
 
     # Training loop
     for epoch in range(start_epoch, num_epochs):
         model.train()
         progress_bar = tqdm(train_dataloader, desc=f"Training Epoch {epoch+1}/{num_epochs}")
         total_loss = 0
-        avg_pixel_acc = 0
-        avg_dice_coeff = 0
         metric = evaluate.load("mean_iou")
         for idx, batch in enumerate(progress_bar):
             images, masks = batch
+            masks = masks.squeeze(1)
             images = images.to(device)
-            masks = masks.squeeze(1).to(device)
+            masks = masks.to(device)
 
             assert masks.max() <= num_labels, f"Mask contains invalid class index: {masks.max()}"
             assert masks.min() >= 0, "Mask contains negative class indices"
@@ -184,6 +193,7 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
 
             # Backward pass
             loss.backward()
+            # accelerator.backward(loss)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
@@ -220,6 +230,8 @@ def train_model(model,optimizer,lr_scheduler,num_labels,num_epochs,train_dataloa
                 "mean_accuracy": metrics["mean_accuracy"]
             })
 
+        # if accelerator.is_main_process:  # Only save on the main process
+        #     unwrapped_model = accelerator.unwrap_model(model)
         # Save model and optimizer state
         torch.save({
             'epoch': epoch,
@@ -276,27 +288,38 @@ if __name__ == '__main__':
     #     bias="none"  # No bias added
     # )
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Car_damages_dataset, Car_parts_dataset
-    dataset = "Car_damages_dataset"
+    # Car_damages_dataset, Car_parts_dataset , CarDNN_Kaggle_merged_Car_damages_dataset
+    dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
+    tmp_dir = os.path.join(datadir,dataset)
 
-    car_dir = os.path.join(datadir,dataset)
-    car_imgs = os.path.join(car_dir,"split_dataset")
-    car_anns = os.path.join(car_dir,"split_annotations")
+    if(dataset != "CarDNN_Kaggle_merged_Car_damages_dataset"):
+        car_dirs = [tmp_dir]
+    elif(dataset == "CarDNN_Kaggle_merged_Car_damages_dataset"):
+        car_dirs = [os.path.join(datadir,"Car_damages_dataset"),os.path.join("./data/CarDD_release/","CarDD_COCO/")]
+    
+    car_imgs = []
+    for car_dir in car_dirs:
+        car_imgs.append(os.path.join(car_dir,"split_dataset"))
+    car_anns = (os.path.join(tmp_dir,"split_annotations"))
+
+    # accelerator = Accelerator(log_with="wandb")
 
     # Important: BS below 16 causes performance degradation
+    # batch_size = 16 //accelerator.num_processes
     batch_size = 16
-    num_epochs = 100
+    num_epochs = 40
 
     # Get the colormapping from labelID of segmentation classes to color
-    car_id_to_color = get_colormapping(os.path.join(car_dir,coco_path),car_dir+"/meta.json")
+    car_id_to_color = get_colormapping(os.path.join(tmp_dir,coco_path),tmp_dir+"/meta.json")
 
     train_car_dataset = get_dataset(car_imgs,car_anns,is_train=True,dataset=dataset)
     val_car_dataset = get_dataset(car_imgs,car_anns,dataset=dataset)
@@ -305,10 +328,10 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size,num_workers=12,pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/high_aug_tnorm_/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39/checkpoints/high_aug_tnorm_/Car_damages_dataset/fusi/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_3.pt"
+    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/fusion/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_0.pt"
 
     continue_run_id = None
-    # continue_run_id = "167kw446"
+    # continue_run_id = "ykm2ec8t"
     
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
@@ -358,6 +381,7 @@ if __name__ == '__main__':
 
     # Set up the learning rate scheduler
     num_training_steps = num_epochs * len(tr_cd_dataloader)
+    # if accelerator.is_main_process:
     print("num_training_steps ",num_training_steps,num_epochs * len(tr_cd_dataloader),car_id_to_color)
     # lr_scheduler = get_scheduler(
     #     name="linear",
@@ -368,9 +392,9 @@ if __name__ == '__main__':
 
     lr_scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
         optimizer=optimizer,
-        num_warmup_steps=200,
+        num_warmup_steps=int(0.1 * num_training_steps), # 10% of training time increase LR linearly
         num_training_steps=num_training_steps,
-        num_cycles=10
+        num_cycles=10 # In the remaining 90% time of training, hop 10 cycles
     )
     if(start_net_path is not None):
         optimizer,lr_scheduler = get_optimizers_from_path(optimizer, lr_scheduler, start_net_path)
@@ -383,8 +407,9 @@ if __name__ == '__main__':
             model = torch.nn.DataParallel(model).cuda()
         else:
             model = model.to(device)
+    # if accelerator.is_main_process:
     print(model)
-    model_save_dir = os.path.join(os.path.join(save_prefix+"checkpoints/high_aug_tnorm_/",dataset+("" if model_type is None else "/"+model_type[:7])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
+    model_save_dir = os.path.join(os.path.join(save_prefix+"new_checkpoints/high_aug_tnorm_/",dataset+("" if model_type is None else "/"+model_type[:7])),"default" if loss_type is None else (loss_type+"_"+str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
     model_save_path = os.path.join(model_save_dir,pretrained_model_name.replace("/","_"))
     is_log_wandb = not(wand_project_name is None)
