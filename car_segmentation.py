@@ -18,10 +18,13 @@ from tqdm import tqdm
 import evaluate
 import wandb
 import torch.nn.functional as F
-from sklearn.metrics import accuracy_score, confusion_matrix
+# from sklearn.metrics import accuracy_score, confusion_matrix
 
 import torch.nn.functional as F
 from accelerate import Accelerator
+
+import torchmetrics.functional as F_metrics
+from torchmetrics.functional import dice, accuracy, jaccard_index
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-6):
@@ -109,102 +112,164 @@ def get_segformermodel(num_labels, model_name):
 
     return model
 
+def gather_if_needed(tensor, accelerator):
+    if accelerator is not None:
+        return accelerator.gather_for_metrics(tensor)
+    return tensor
+
 def evaluate_model(model, num_labels, val_dataloader, accelerator=None, is_return_metric_obj=False):
-    metric = evaluate.load("mean_iou")
+    device = accelerator.device if accelerator is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     model.eval()
-    total_loss = 0
+    total_loss = 0.0
+    total_correct_pixels = 0
+    total_pixels = 0
+    avg_val_loss = 0.
+    mean_iou = 0.
+    mean_accuracy = 0.
+    overall_pixel_acc = 0.
+    mean_dice = 0.
+    metrics_dict={}
 
-    pixel_acc_total = 0.0
-    dice_coeff_total = 0.0
-    sample_count = 0
-    avg_val_loss = 0
-    avg_pixel_acc = 0
-    avg_dice_coeff = 0
+    total_confusion_matrix = None
+    if accelerator is None or accelerator.is_main_process:
+         total_confusion_matrix = torch.zeros(num_labels+1, num_labels+1, dtype=torch.long, device=device)
 
-    for idx, batch in enumerate(tqdm(val_dataloader, desc="Evaluating", disable=accelerator is not None and not accelerator.is_main_process)):
-        images, masks = batch
-        masks = masks.squeeze(1)
-
-        if accelerator is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            images = images.to(device)
-            masks = masks.to(device)
-
+    for idx, batch in enumerate(tqdm(val_dataloader, desc="Evaluating", disable=(accelerator is not None and not accelerator.is_main_process))):
         with torch.no_grad():
+            images, masks = batch
+            masks = masks.squeeze(1)
+
+            if accelerator is None:
+                images = images.to(device)
+                masks = masks.to(device)
+
             outputs = model(images, labels=masks)
             loss, logits = outputs.loss.mean(), outputs.logits
+            if accelerator is not None:
+                loss = accelerator.gather(loss).mean()
             total_loss += loss.item()
 
             upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
             predicted = upsampled_logits.argmax(dim=1)
 
-            if accelerator is not None:
-                predicted = accelerator.gather(predicted).cpu()
-                masks = accelerator.gather(masks).cpu()
-            else:
-                predicted = predicted.cpu()
-                masks = masks.cpu()
+            predicted = gather_if_needed(predicted, accelerator)
+            masks = gather_if_needed(masks, accelerator)
 
-            # Only main process adds to metric
             if accelerator is None or accelerator.is_main_process:
-                preds_np = predicted.detach().numpy()
-                refs_np = masks.detach().numpy()
-                metric.add_batch(predictions=preds_np, references=refs_np)
+                predicted = predicted.view(-1)
+                masks = masks.view(-1)
 
-                pixel_acc_total += pixel_accuracy(predicted, masks) * predicted.shape[0]
-                dice_coeff_total += dice_coefficient(predicted, masks, num_labels + 1) * predicted.shape[0]
-                sample_count += predicted.shape[0]
+                total_correct_pixels += (predicted == masks).sum().item()
+                total_pixels += predicted.numel()
+                # Compute confusion matrix for the current batch and add to total
+                batch_confusion_matrix = F_metrics.confusion_matrix(
+                    predicted,
+                    masks,
+                    task="multiclass",
+                    num_classes=num_labels+1
+                ).to(device)
 
-    # Compute metrics on main process
-    if accelerator is None or accelerator.is_main_process:
-        metrics = metric.compute(num_labels=num_labels + 1, ignore_index=None, reduce_labels=False)
-        avg_val_loss = total_loss / len(val_dataloader)
-
-        avg_pixel_acc = pixel_acc_total / sample_count if sample_count > 0 else 0.0
-        avg_dice_coeff = dice_coeff_total / sample_count if sample_count > 0 else 0.0
-
-        print(
-            f"\nValidation loss: {avg_val_loss:.4f}, mean_iou: {metrics['mean_iou']:.4f}, "
-            f"mean_accuracy: {metrics['mean_accuracy']:.4f}, pixel_accuracy: {avg_pixel_acc:.4f}, "
-            f"dice_coeff: {avg_dice_coeff:.4f}"
-        )
-        per_class_iou = metrics.get('per_category_iou', None)
-        if per_class_iou is not None:
-            for cls_id, iou in enumerate(per_class_iou):
-                print(f"Class {cls_id} IoU: {iou:.4f}")
-
-
-        if is_return_metric_obj:
-            return avg_val_loss, metrics["mean_iou"], metrics["mean_accuracy"], avg_pixel_acc, avg_dice_coeff, metrics
-
-        return avg_val_loss, metrics["mean_iou"], metrics["mean_accuracy"], avg_pixel_acc, avg_dice_coeff
+                total_confusion_matrix += batch_confusion_matrix
     
+    # Make sure to wait for all processes to finish
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+
+    if accelerator is None or accelerator.is_main_process:
+        avg_val_loss = total_loss / len(val_dataloader)
+        # Calculate metrics from the total confusion matrix
+        if total_confusion_matrix is not None and total_confusion_matrix.sum() > 0:
+            # Calculate True Positives (TP), False Positives (FP), False Negatives (FN) per class
+            # TP: diagonal elements of the confusion matrix
+            tp = total_confusion_matrix.diag()
+            # FP: sum of the column (predicted class) minus TP
+            fp = total_confusion_matrix.sum(dim=0) - tp
+            # FN: sum of the row (actual class) minus TP
+            fn = total_confusion_matrix.sum(dim=1) - tp
+
+            # Add a small epsilon to avoid division by zero for classes not present
+            epsilon = 1e-6
+
+            # Calculate IoU (Jaccard Index) per class: TP / (TP + FP + FN)
+            # Handle potential NaNs or Infs if a class has no ground truth or predictions (TP+FP+FN=0)
+            per_class_iou = tp.float() / (tp + fp + fn + epsilon).float()
+            # Replace NaNs with 0 if a class was entirely absent
+            per_class_iou[torch.isnan(per_class_iou)] = 0.0
+             # You might choose to average only classes that were actually present if needed
+            mean_iou = per_class_iou.mean().item()
+
+
+            # Calculate Accuracy per class (optional, often overall or mean IoU is key for segmentation)
+            # TP + TN / Total. TN is tricky from just TP, FP, FN directly for multi-class without total N.
+            # Overall pixel accuracy is simpler and more standard
+            overall_pixel_acc = total_correct_pixels / total_pixels if total_pixels > 0 else 0.0
+            # You can also get overall accuracy from confusion matrix: total_confusion_matrix.diag().sum() / total_confusion_matrix.sum()
+            # Let's use the accumulated pixel counts as it's already done.
+
+            # Calculate Dice score per class: 2 * TP / (2 * TP + FP + FN)
+            per_class_dice = (2. * tp.float()) / (2. * tp + fp + fn + epsilon).float()
+            # Replace NaNs with 0
+            per_class_dice[torch.isnan(per_class_dice)] = 0.0
+            # Macro Dice is the mean of per-class Dice scores
+            mean_dice = per_class_dice.mean().item()
+
+            # Mean Accuracy (average of per-class accuracies)
+            # Calculating true per-class accuracy requires TN per class, which is sum of all non-TPs outside row/column
+            # A common approximation or what torchmetrics does for average="none" accuracy is per_class_correct / per_class_total
+            # where per_class_correct is TP and per_class_total is FN + TP (actual positives).
+            # Let's stick to a common definition, possibly what MulticlassAccuracy(average="none") does,
+            # which might be TP[i] / (total samples with true label i). Let's recalculate based on true counts.
+            true_class_counts = total_confusion_matrix.sum(dim=1) # Sum of rows
+            per_class_acc_from_counts = tp.float() / (true_class_counts.float() + epsilon)
+            per_class_acc_from_counts[torch.isnan(per_class_acc_from_counts)] = 0.0
+            mean_accuracy = per_class_acc_from_counts.mean().item()
+
+        overall_pixel_acc = total_correct_pixels / total_pixels if total_pixels > 0 else 0.0
+
+        print(f"\n loss: {avg_val_loss:.4f}, mean_iou: {mean_iou:.4f}, "
+              f"mean_accuracy: {mean_accuracy:.4f}, pixel_accuracy: {overall_pixel_acc:.4f}, "
+              f"dice_coeff: {mean_dice:.4f}")
+
+        for cls_id, iou in enumerate(per_class_iou):
+            print(f"Class {cls_id} IoU: {iou.item():.4f} Dice:{per_class_dice[cls_id].item():.4f} Acc:{per_class_acc_from_counts[cls_id].item():.4f}")
+
+        metrics_dict = {
+            "mean_iou": mean_iou,
+            "mean_accuracy": mean_accuracy,
+            "per_category_iou": per_class_iou.tolist()
+        }
+
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+
     if is_return_metric_obj:
-        return 0.,0.,0.,0.,0.,0.
-    return 0.,0.,0.,0.,0.
+        return avg_val_loss, mean_iou, mean_accuracy, overall_pixel_acc, mean_dice, metrics_dict
+    return avg_val_loss, mean_iou, mean_accuracy, overall_pixel_acc, mean_dice
 
 def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_dataloader, val_dataloader,
                 model_path, accelerator=None, wand_project_name=None, start_epoch=0, loss_type=None, alpha=0.5,
                 lora_config=None):
-    is_log_wandb = not (wand_project_name is None)
-    if (accelerator is None):
+    device = accelerator.device if accelerator is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    is_log_wandb = wand_project_name is not None
+    if accelerator is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
             model, optimizer, train_dataloader, val_dataloader, lr_scheduler
         )
 
-    # Training loop
     for epoch in range(start_epoch, num_epochs):
         model.train()
         progress_bar = tqdm(train_dataloader, desc=f"Training Epoch {epoch + 1}/{num_epochs}",
-                            disable=not (accelerator is None or accelerator.is_main_process))  # Only show progress bar on main process
-        total_loss = 0
-        metric = evaluate.load("mean_iou")
+                            disable=(accelerator is not None and not accelerator.is_main_process))
+
         for idx, batch in enumerate(progress_bar):
             images, masks = batch
             masks = masks.squeeze(1)
-            if (accelerator is None):
+
+            if accelerator is None:
                 images = images.to(device)
                 masks = masks.to(device)
 
@@ -212,15 +277,12 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
             assert masks.min() >= 0, "Mask contains negative class indices"
             assert images.size()[2:] == masks.size()[1:], "Size mismatch between mask and images"
 
-            # Forward pass
             outputs = model(images, labels=masks)
             loss, logits = outputs.loss.mean(), outputs.logits
-
-            if (loss_type is not None):
+            if loss_type is not None:
                 loss = combined_loss(logits, masks, loss_type, alpha)
 
-            # Backward pass
-            if (accelerator is None):
+            if accelerator is None:
                 loss.backward()
             else:
                 accelerator.backward(loss)
@@ -228,41 +290,29 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
             lr_scheduler.step()
             optimizer.zero_grad()
 
-            # Evaluation metrics
             with torch.no_grad():
-                upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear",
-                                                align_corners=False)
+                upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
                 predicted = upsampled_logits.argmax(dim=1)
-                # print(f"Logits shape after interpolation: {upsampled_logits.shape}, Predicted shape: {predicted.shape}")
 
                 # Ensure predicted is the same shape as masks (batch_size, height, width)
                 assert predicted.shape == masks.shape, "Predicted shape doesn't match masks shape"
 
-            total_loss += loss.item()
-            # Log metrics every 10 batches
             if idx % 10 == 0 and (accelerator is None or accelerator.is_main_process):
-                metrics = metric._compute(
-                    predictions=predicted.cpu(),
-                    references=masks.cpu(),
-                    num_labels=num_labels + 1,
-                    ignore_index=None,
-                    reduce_labels=False
-                )
-                del predicted, masks
-                torch.cuda.empty_cache()
-
-                # Update progress bar
+                preds_flat = predicted.view(-1).to(device)
+                targets_flat = masks.view(-1).to(device)
+                # Compute metrics for this batch only
+                batch_iou = jaccard_index(preds_flat, targets_flat, num_classes=num_labels + 1, average="macro",task="multiclass")
+                batch_acc = accuracy(preds_flat, targets_flat, num_classes=num_labels + 1, average="macro", task="multiclass")
+                batch_dice = dice(preds_flat, targets_flat, num_classes=num_labels + 1, average="macro")
                 progress_bar.set_postfix({
                     "loss": loss.item(),
-                    "mean_iou": metrics["mean_iou"],
-                    "mean_accuracy": metrics["mean_accuracy"]
+                    "mean_iou": batch_iou.item(),
+                    "mean_accuracy": batch_acc.item(),
+                    "mean_dice":batch_dice.item()
                 })
 
-        if (accelerator is None or accelerator.is_main_process):  # Only save on the main process
-            unwrapped_model = model
-            if (accelerator is not None):
-                unwrapped_model = accelerator.unwrap_model(model)
-            # Save model and optimizer state
+        if accelerator is None or accelerator.is_main_process:
+            unwrapped_model = model if accelerator is None else accelerator.unwrap_model(model)
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': unwrapped_model.state_dict(),
@@ -271,31 +321,27 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                 'lora_config': lora_config,
             }, model_path + "_ep_" + str(epoch) + ".pt")
 
-        # Log validation performance
+        train_loss, mean_iou, mean_acc, train_pixel_acc, mean_dice = evaluate_model(model, num_labels, train_dataloader, accelerator)
+        val_loss, val_iou, val_acc, val_pixel_acc, val_dice = evaluate_model(model, num_labels, val_dataloader, accelerator)
+
         current_lr = optimizer.param_groups[0]['lr']
         scheduler_type = str(lr_scheduler)
-        train_loss, train_iou, train_acc, train_pixel_accuracy, train_dice_coeff = evaluate_model(
-            model, num_labels, train_dataloader, accelerator)
-        val_loss, val_iou, val_acc, val_pixel_accuracy, val_dice_coeff = evaluate_model(model, num_labels,
-                                                                                       val_dataloader, accelerator)
-
         if is_log_wandb and (accelerator is None or accelerator.is_main_process):
             wandb.log({
                 "current_epoch": epoch,
-                'learning_rate': current_lr,
-                'scheduler_type': scheduler_type,
+                "learning_rate": current_lr,
+                "scheduler_type": scheduler_type,
                 "val_iou": val_iou,
                 "val_accuracy": val_acc,
                 "val_loss": val_loss,
-                "mean_iou": train_iou,
-                "mean_accuracy": train_acc,
-                "pixel_accuracy": train_pixel_accuracy,
-                "dice_coeff": train_dice_coeff,
-                "val_pixel_accuracy": val_pixel_accuracy,
-                "val_dice_coeff": val_dice_coeff,
+                "mean_iou": mean_iou,
+                "mean_accuracy": mean_acc,
+                "pixel_accuracy": train_pixel_acc,
+                "dice_coeff": mean_dice,
+                "val_pixel_accuracy": val_pixel_acc,
+                "val_dice_coeff": val_dice,
                 "loss": train_loss
             })
-
     return
 
 if __name__ == '__main__':
@@ -360,9 +406,9 @@ if __name__ == '__main__':
     train_car_dataset = get_dataset(car_imgs, car_anns, is_train=True, dataset=dataset)
     val_car_dataset = get_dataset(car_imgs, car_anns, dataset=dataset)
 
-    tr_cd_dataloader = DataLoader(train_car_dataset, batch_size=batch_size, shuffle=True, num_workers=12,
+    tr_cd_dataloader = DataLoader(train_car_dataset, batch_size=batch_size, shuffle=True, num_workers=6,
                                   pin_memory=True)
-    val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=12, pin_memory=True)
+    val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=6, pin_memory=True)
 
     start_net_path = None
     # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/Car_damages_dataset/fusion/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_0.pt"
@@ -462,6 +508,8 @@ if __name__ == '__main__':
     if (is_log_wandb and (accelerator is None or accelerator.is_main_process)):
         wandb_config = dict()
         wandb_config["optimizer"] = optimizer
+        if(accelerator is not None):
+            wandb_config["accelerator"] = accelerator.state
         wandb_config["final_model_save_path"] = model_save_path
         wandb_config["num_epochs"] = num_epochs
         wandb_config["batch_size"] = batch_size
