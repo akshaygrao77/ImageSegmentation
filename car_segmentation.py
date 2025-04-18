@@ -277,27 +277,37 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
             assert masks.min() >= 0, "Mask contains negative class indices"
             assert images.size()[2:] == masks.size()[1:], "Size mismatch between mask and images"
 
-            outputs = model(images, labels=masks)
-            loss, logits = outputs.loss.mean(), outputs.logits
-            if loss_type is not None:
-                loss = combined_loss(logits, masks, loss_type, alpha)
+            if(accelerator is not None):
+                with accelerator.accumulate(model):
+                    outputs = model(images, labels=masks)
+                    loss, logits = outputs.loss.mean(), outputs.logits
+                    if loss_type is not None:
+                        loss = combined_loss(logits, masks, loss_type, alpha)
 
-            if accelerator is None:
-                loss.backward()
+                    accelerator.backward(loss)
+                    optimizer.step()
+                    if lr_scheduler is not None and accelerator.sync_gradients:
+                        lr_scheduler.step()
+                    optimizer.zero_grad()
             else:
-                accelerator.backward(loss)
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+                outputs = model(images, labels=masks)
+                loss, logits = outputs.loss.mean(), outputs.logits
+                if loss_type is not None:
+                    loss = combined_loss(logits, masks, loss_type, alpha)
 
-            with torch.no_grad():
-                upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
-                predicted = upsampled_logits.argmax(dim=1)
-
-                # Ensure predicted is the same shape as masks (batch_size, height, width)
-                assert predicted.shape == masks.shape, "Predicted shape doesn't match masks shape"
+                loss.backward()
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
 
             if idx % 10 == 0 and (accelerator is None or accelerator.is_main_process):
+                with torch.no_grad():
+                    upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
+                    predicted = upsampled_logits.argmax(dim=1)
+
+                    # Ensure predicted is the same shape as masks (batch_size, height, width)
+                    assert predicted.shape == masks.shape, "Predicted shape doesn't match masks shape"
+            
                 preds_flat = predicted.view(-1).to(device)
                 targets_flat = masks.view(-1).to(device)
                 # Compute metrics for this batch only
@@ -367,7 +377,7 @@ if __name__ == '__main__':
     # )
 
     # Car_damages_dataset, Car_parts_dataset , CarDNN_Kaggle_merged_Car_damages_dataset
-    dataset = "Car_damages_dataset"
+    dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
@@ -389,11 +399,11 @@ if __name__ == '__main__':
     car_anns = (os.path.join(tmp_dir, "split_annotations"))
 
     accelerator = None
-    # accelerator = Accelerator(mixed_precision='fp16')
-    accelerator = Accelerator()
+    accelerator = Accelerator(mixed_precision='fp16')
+    # accelerator = Accelerator(gradient_accumulation_steps=2)
 
     # Important: BS below 16 causes performance degradation
-    batch_size = 16
+    batch_size = 24
     num_epochs = 40
 
     if(accelerator is not None):
