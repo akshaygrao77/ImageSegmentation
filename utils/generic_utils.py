@@ -36,10 +36,11 @@ def get_model_from_path(model,chkpath):
     model.load_state_dict(state_dict)
     
     epoch = checkpoint['epoch']  # Return the epoch if needed
+    best_perf_metric = checkpoint['best_perf_metric'] if 'best_perf_metric' in checkpoint else 0.0
     
     print(f"Model loaded from {chkpath}")
     
-    return model, epoch
+    return model, epoch, best_perf_metric
 
 def get_loraconfig_from_path(chkpath):
     # Load the checkpoint

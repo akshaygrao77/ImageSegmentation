@@ -249,7 +249,7 @@ def evaluate_model(model, num_labels, val_dataloader, accelerator=None, is_retur
 
 def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_dataloader, val_dataloader,
                 model_path, accelerator=None, wand_project_name=None, start_epoch=0, loss_type=None, alpha=0.5,
-                lora_config=None):
+                lora_config=None,best_perf_metric=0):
     device = accelerator.device if accelerator is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     is_log_wandb = wand_project_name is not None
@@ -329,6 +329,7 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                 'optimizer_state_dict': optimizer.state_dict(),
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'lora_config': lora_config,
+                'best_perf_metric': best_perf_metric,
             }, model_path + "_ep_" + str(epoch) + ".pt")
 
         train_loss, mean_iou, mean_acc, train_pixel_acc, mean_dice = evaluate_model(model, num_labels, train_dataloader, accelerator)
@@ -350,8 +351,22 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                 "dice_coeff": mean_dice,
                 "val_pixel_accuracy": val_pixel_acc,
                 "val_dice_coeff": val_dice,
-                "loss": train_loss
+                "loss": train_loss,
+                "best_perf_metric": best_perf_metric,
             })
+        
+        if(best_perf_metric < val_iou*val_dice):
+            if accelerator is None or accelerator.is_main_process:
+                unwrapped_model = model if accelerator is None else accelerator.unwrap_model(model)
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': unwrapped_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'lr_scheduler' : lr_scheduler.state_dict(),
+                    'lora_config' : lora_config,
+                    'best_perf_metric' : best_perf_metric,
+                }, model_path + "_best.pt")
+            best_perf_metric = val_iou*val_dice
     return
 
 if __name__ == '__main__':
@@ -380,10 +395,10 @@ if __name__ == '__main__':
     dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -443,7 +458,7 @@ if __name__ == '__main__':
         superseg_id_to_color = get_colormapping(os.path.join(superseg_dir, get_cocopath(superseg_ds)),
                                                 superseg_dir + "/meta.json")
         super_segmodel = get_segformermodel(len(superseg_id_to_color), superseg_model_name)
-        super_segmodel, _ = get_model_from_path(super_segmodel, super_segmodel_path)
+        super_segmodel, _, _ = get_model_from_path(super_segmodel, super_segmodel_path)
         save_prefix = super_segmodel_path[:super_segmodel_path.find('.pt')] + "/"
         if (model_type == 'hierarchical'):
             model = Hierarchical_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
@@ -471,8 +486,9 @@ if __name__ == '__main__':
                 model.model = get_peft_model(model.model, lora_config)
                 model_type = 'lr' + model_type
 
+    best_perf_metric = 0
     if (start_net_path is not None):
-        model, start_epoch = get_model_from_path(model, start_net_path)
+        model, start_epoch, best_perf_metric = get_model_from_path(model, start_net_path)
     # Define optimizer and learning rate scheduler
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
@@ -491,7 +507,7 @@ if __name__ == '__main__':
         optimizer=optimizer,
         num_warmup_steps=int(0.1 * num_training_steps), # 10% of training time increase LR linearly
         num_training_steps=num_training_steps,
-        num_cycles=10 # In the remaining 90% time of training, hop 10 cycles
+        num_cycles = (num_epochs//4) # In the remaining 90% time of training, hop every 4 epoch
     )
     if(start_net_path is not None):
         optimizer,lr_scheduler = get_optimizers_from_path(optimizer, lr_scheduler, start_net_path)
@@ -565,4 +581,4 @@ if __name__ == '__main__':
 
     train_model(model, optimizer, lr_scheduler, len(car_id_to_color), num_epochs, tr_cd_dataloader,
                 val_cd_dataloader, model_save_path, accelerator, wand_project_name, start_epoch,
-                loss_type, alpha, lora_config)
+                loss_type, alpha, lora_config, best_perf_metric)
