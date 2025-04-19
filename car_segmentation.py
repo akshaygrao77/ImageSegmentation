@@ -53,21 +53,26 @@ class IOULoss(nn.Module):
         return 1 - iou_score.mean()  # Dice loss
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+    def __init__(self, alpha=1, gamma=2, reduction='mean',class_weights=None):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
+        self.class_weights = class_weights
 
     def forward(self, logits, targets):
         # Apply softmax to logits to get predicted probabilities (logits -> probabilities)
         probs = F.softmax(logits, dim=1)
+        targets = targets.long()
 
         # Select the probabilities corresponding to the true class
         target_probs = probs.gather(1, targets.unsqueeze(1))  # Shape: (B, 1)
 
         # Compute Cross-Entropy Loss (for the true class)
         ce_loss = F.cross_entropy(logits, targets, reduction='none')
+        if self.class_weights is not None:
+            weights = self.class_weights[targets]
+            ce_loss = ce_loss * weights
 
         # Compute Focal Loss
         focal_loss = self.alpha * (1 - target_probs) ** self.gamma * ce_loss
@@ -79,7 +84,7 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss
 
-def combined_loss(logits, targets, loss_type, alpha=0.5):
+def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     """
     Combined Cross-Entropy and Dice Loss with proper upsampling of logits.
     """
@@ -87,19 +92,32 @@ def combined_loss(logits, targets, loss_type, alpha=0.5):
     # Downsample targets to match the input image size
     # Important: Downsampling targets for loss calculation seems to be better compared to upsampling logits bcoz upsampling logits can introduce artifacts
     targets = F.interpolate(targets.unsqueeze(1).float(), size=logits.shape[-2:], mode="nearest").squeeze(1).long()
-
-    # Cross-Entropy Loss
-    ce_loss = F.cross_entropy(logits, targets, reduction='mean')
+    
+    if dataset == "Car_damages_dataset":
+        # Median balanced weights pre-computed
+        median_weights = torch.tensor([0.007330882283506196,0.28334594392635665,0.13777006322875054,0.8670423260239092,5.213402101030479,10.336641529852535,1.0,4.878550231779302,1.6600393131311797], device=logits.device)
+    elif dataset == "CarDNN_Kaggle_merged_Car_damages_dataset":
+        # Median balanced weights pre-computed
+        median_weights = torch.tensor([0.00217733043830974,0.03197547010896361,0.012607789107358536,2.0573060536004006,12.370288485786435,24.526640228491583,0.03335967671433147,11.575756596173864,1.0], device=logits.device)
+    elif dataset == "Car_parts_dataset":
+        # Median balanced weights pre-computed
+        median_weights = torch.tensor([0.04713219181108924,0.46780447957804006,0.8226677237979122,2.295045034695851,1.6657497540963886,0.3523892849398128,0.6480218689411196,0.7877552602216747,0.3301445520518123,1.5692173388105741,4.9711122707088915,3.11386416386265,1.6210466382167426,0.49036456494308545,1.1161060908411526,3.5601432517995577,0.7916959768684058,6.8852797356351045,2.837301590521953,0.6831727317740973,0.9057742712114433,1.854989695026368], device=logits.device)
+    ce_weights = None
+    if "wt_" in loss_type:
+        ce_weights = median_weights
+        loss_type = loss_type.replace("wt_","")
+    
+    ce_loss = F.cross_entropy(logits, targets, reduction='mean',weight=ce_weights)
     m_loss = 1 / (1 - alpha)
     if loss_type == 'dice':
         # Dice Loss
         m_loss = DiceLoss()(logits, targets)
     elif loss_type == 'focal':
-        m_loss = FocalLoss()(logits, targets)
+        m_loss = FocalLoss(class_weights=ce_weights)(logits, targets)
     elif loss_type == 'iou':
         m_loss = IOULoss()(logits, targets)
     elif loss_type == 'di_foc':
-        return (1 - alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss()(logits, targets)
+        return (1 - alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss(class_weights=ce_weights)(logits, targets)
     elif loss_type == 'di_iou':
         return (1 - alpha) * DiceLoss()(logits, targets) + alpha * IOULoss()(logits, targets)
     # Combined loss
@@ -248,7 +266,7 @@ def evaluate_model(model, num_labels, val_dataloader, accelerator=None, is_retur
     return avg_val_loss, mean_iou, mean_accuracy, overall_pixel_acc, mean_dice
 
 def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_dataloader, val_dataloader,
-                model_path, accelerator=None, wand_project_name=None, start_epoch=0, loss_type=None, alpha=0.5,
+                model_path, dataset, accelerator=None, wand_project_name=None, start_epoch=0, loss_type=None, alpha=0.5,
                 lora_config=None,best_perf_metric=0):
     device = accelerator.device if accelerator is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -282,7 +300,7 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                     outputs = model(images, labels=masks)
                     loss, logits = outputs.loss.mean(), outputs.logits
                     if loss_type is not None:
-                        loss = combined_loss(logits, masks, loss_type, alpha)
+                        loss = combined_loss(logits, masks, loss_type, dataset, alpha)
 
                     accelerator.backward(loss)
                     optimizer.step()
@@ -293,7 +311,7 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                 outputs = model(images, labels=masks)
                 loss, logits = outputs.loss.mean(), outputs.logits
                 if loss_type is not None:
-                    loss = combined_loss(logits, masks, loss_type, alpha)
+                    loss = combined_loss(logits, masks, loss_type, dataset, alpha)
 
                 loss.backward()
                 optimizer.step()
@@ -373,9 +391,10 @@ if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
     wand_project_name = "new_Car_Damage_Segmentation"
+    # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'dice'
-    alpha = 0.5
+    loss_type = 'wt_dice'
+    alpha = 0.9
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
     model_type = 'fusion'
@@ -395,10 +414,10 @@ if __name__ == '__main__':
     dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -418,7 +437,7 @@ if __name__ == '__main__':
     # accelerator = Accelerator(gradient_accumulation_steps=2)
 
     # Important: BS below 16 causes performance degradation
-    batch_size = 24
+    batch_size = 20
     num_epochs = 40
 
     if(accelerator is not None):
@@ -436,10 +455,10 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=6, pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/Car_damages_dataset/fusion/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_0.pt"
+    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/fusion/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_19.pt"
 
     continue_run_id = None
-    # continue_run_id = "17kecjz4"
+    # continue_run_id = "3p237v9l"
 
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
@@ -580,5 +599,5 @@ if __name__ == '__main__':
         print(f"Non-trainable parameters: {non_trainable_params:,}")
 
     train_model(model, optimizer, lr_scheduler, len(car_id_to_color), num_epochs, tr_cd_dataloader,
-                val_cd_dataloader, model_save_path, accelerator, wand_project_name, start_epoch,
+                val_cd_dataloader, model_save_path, dataset, accelerator, wand_project_name, start_epoch,
                 loss_type, alpha, lora_config, best_perf_metric)
