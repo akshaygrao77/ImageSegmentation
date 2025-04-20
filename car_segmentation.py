@@ -115,7 +115,7 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
             loss_type = loss_type.replace("wt_","")
     
     ce_loss = F.cross_entropy(logits, targets, reduction='mean',weight=ce_weights)
-    m_loss = 1 / (1 - alpha)
+    m_loss = 1 / alpha
     if loss_type == 'dice':
         # Dice Loss
         m_loss = DiceLoss()(logits, targets)
@@ -124,9 +124,11 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     elif loss_type == 'iou':
         m_loss = IOULoss()(logits, targets)
     elif loss_type == 'di_foc':
-        return (1 - alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss()(logits, targets)
+        # The base signal of ce_loss is needed
+        return (1 - alpha) * DiceLoss()(logits, targets) + (alpha-0.1) * FocalLoss()(logits, targets) + 0.1 * ce_loss
     elif loss_type == 'di_iou':
-        return (1 - alpha) * DiceLoss()(logits, targets) + alpha * IOULoss()(logits, targets)
+        # The base signal of ce_loss is needed
+        return (1 - alpha) * DiceLoss()(logits, targets) + (alpha-0.1) * IOULoss()(logits, targets) + 0.1 * ce_loss
     # Combined loss
     return (1 - alpha) * ce_loss + alpha * m_loss
 
@@ -404,19 +406,19 @@ if __name__ == '__main__':
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'di_foc'
+    loss_type = 'wt_di_foc'
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
-    model_type = 'fusion'
+    model_type = 'ex_fusion'
 
     # Wrap SegFormer with LoRA
     lora_config = None
     # lora_config = LoraConfig(
     #     task_type="TOKEN_CLASSIFICATION",  # Better aligned with segmentation tasks
-    #     r=8,  # Low-rank adaptation dimension
+    #     r=36,  # Low-rank adaptation dimension
     #     lora_alpha=16,  # Scaling factor
-    #     lora_dropout=0.1,  # Dropout for LoRA layers
+    #     lora_dropout=0.2,  # Dropout for LoRA layers
     #     target_modules=["query", "value"],  # Target attention layers
     #     bias="none"  # No bias added
     # )
@@ -425,10 +427,10 @@ if __name__ == '__main__':
     dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -559,6 +561,16 @@ if __name__ == '__main__':
                      dataset + ("" if model_type is None else "/" + model_type[:7])),
         "default" if loss_type is None else (loss_type + "_" + str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    non_trainable_params = total_params - trainable_params
+
+    if (accelerator is None or accelerator.is_main_process):
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Non-trainable parameters: {non_trainable_params:,}")
+
     model_save_path = os.path.join(model_save_dir, pretrained_model_name.replace("/", "_"))
     is_log_wandb = not (wand_project_name is None)
     if (is_log_wandb and (accelerator is None or accelerator.is_main_process)):
@@ -566,6 +578,9 @@ if __name__ == '__main__':
         wandb_config["optimizer"] = optimizer
         if(accelerator is not None):
             wandb_config["accelerator"] = accelerator.state
+        wandb_config["total_params"] = total_params
+        wandb_config["trainable_params"] = trainable_params
+        wandb_config["non_trainable_params"] = non_trainable_params
         wandb_config["final_model_save_path"] = model_save_path
         wandb_config["num_epochs"] = num_epochs
         wandb_config["batch_size"] = batch_size
@@ -599,15 +614,6 @@ if __name__ == '__main__':
                 id=continue_run_id,  # ID of the previous run
                 resume="allow"     # Use "must" to enforce resumption or "allow" to create a new run if not found
             )
-
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    non_trainable_params = total_params - trainable_params
-
-    if (accelerator is None or accelerator.is_main_process):
-        print(f"Total parameters: {total_params:,}")
-        print(f"Trainable parameters: {trainable_params:,}")
-        print(f"Non-trainable parameters: {non_trainable_params:,}")
 
     train_model(model, optimizer, lr_scheduler, len(car_id_to_color), num_epochs, tr_cd_dataloader,
                 val_cd_dataloader, model_save_path, dataset, accelerator, wand_project_name, start_epoch,
