@@ -87,6 +87,8 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss
 
+# Track running means
+run_d = run_f = run_i = run_c = 1.0
 def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     """
     Combined Cross-Entropy and Dice Loss with proper upsampling of logits.
@@ -134,6 +136,21 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     elif loss_type == 'all':
         # The base signal of ce_loss is needed
         return 0.3 * DiceLoss()(logits, targets) + 0.3 * IOULoss()(logits, targets) + 0.3 * FocalLoss()(logits, targets) + 0.1 * ce_loss
+    elif loss_type == 'all_dynamic':
+        global run_d, run_f, run_i, run_c
+        dice = DiceLoss()(logits, targets)
+        focal = FocalLoss()(logits, targets)
+        iou = IOULoss()(logits, targets)
+        # update running means
+        run_d = 0.99*run_d + 0.01*dice.detach()
+        run_f = 0.99*run_f + 0.01*focal.detach()
+        run_i = 0.99*run_i + 0.01*iou.detach()
+        run_c = 0.99*run_c + 0.01*ce_loss.detach()
+        # normalize and combine
+        return (0.3*(dice / run_d)
+            + 0.3*(focal/ run_f)
+            + 0.3*(iou  / run_i)
+            + 0.1*(ce_loss  / run_c))
     # Combined loss
     return (1 - alpha) * ce_loss + alpha * m_loss
 
@@ -411,11 +428,11 @@ if __name__ == '__main__':
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'wt_iou'
-    alpha = 0.9
+    loss_type = 'wt_di_foc'
+    alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
-    model_type = 'fusion'
+    model_type = 'ex_fusion'
 
     # Wrap SegFormer with LoRA
     lora_config = None
@@ -432,10 +449,10 @@ if __name__ == '__main__':
     dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
