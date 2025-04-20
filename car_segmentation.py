@@ -344,8 +344,25 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                     "mean_accuracy": batch_acc.item(),
                     "mean_dice":batch_dice.item()
                 })
+        
+        train_loss, mean_iou, mean_acc, train_pixel_acc, mean_dice = evaluate_model(model, num_labels, train_dataloader, accelerator)
+        val_loss, val_iou, val_acc, val_pixel_acc, val_dice = evaluate_model(model, num_labels, val_dataloader, accelerator)
+        
+        if(best_perf_metric < val_iou*val_dice):
+            best_perf_metric = val_iou*val_dice
+            if accelerator is None or accelerator.is_main_process:
+                unwrapped_model = model if accelerator is None else accelerator.unwrap_model(model)
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': unwrapped_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'lr_scheduler' : lr_scheduler.state_dict(),
+                    'lora_config' : lora_config,
+                    'best_perf_metric' : best_perf_metric,
+                }, model_path + "_best.pt")
 
         if accelerator is None or accelerator.is_main_process:
+            tmp_path = model_path + "_tmp"
             unwrapped_model = model if accelerator is None else accelerator.unwrap_model(model)
             torch.save({
                 'epoch': epoch,
@@ -354,10 +371,9 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'lora_config': lora_config,
                 'best_perf_metric': best_perf_metric,
-            }, model_path + "_ep_" + str(epoch) + ".pt")
-
-        train_loss, mean_iou, mean_acc, train_pixel_acc, mean_dice = evaluate_model(model, num_labels, train_dataloader, accelerator)
-        val_loss, val_iou, val_acc, val_pixel_acc, val_dice = evaluate_model(model, num_labels, val_dataloader, accelerator)
+            }, tmp_path)
+            # This intermediate step prevents corrupted overwrites when process is interrupted in between while writing
+            os.replace(tmp_path, model_path + "_backup.pt")  # atomic on most OSes
 
         current_lr = optimizer.param_groups[0]['lr']
         scheduler_type = str(lr_scheduler)
@@ -379,18 +395,6 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                 "best_perf_metric": best_perf_metric,
             })
         
-        if(best_perf_metric < val_iou*val_dice):
-            if accelerator is None or accelerator.is_main_process:
-                unwrapped_model = model if accelerator is None else accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': unwrapped_model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'lr_scheduler' : lr_scheduler.state_dict(),
-                    'lora_config' : lora_config,
-                    'best_perf_metric' : best_perf_metric,
-                }, model_path + "_best.pt")
-            best_perf_metric = val_iou*val_dice
     return
 
 if __name__ == '__main__':
@@ -399,7 +403,7 @@ if __name__ == '__main__':
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'wt_dice'
+    loss_type = 'wt_focal'
     alpha = 0.9
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
@@ -444,7 +448,7 @@ if __name__ == '__main__':
 
     # Important: BS below 16 causes performance degradation
     batch_size = 24
-    num_epochs = 40
+    num_epochs = 80
 
     if(accelerator is not None):
         print(f"accelerator.num_processes:{accelerator.num_processes}, accelerator.state:   {accelerator.state}")
@@ -461,10 +465,10 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=6, pin_memory=True)
 
     start_net_path = None
-    start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/fusion/wt_dice_0.9/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
+    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/fusion/wt_dice_0.9/nvidia_segformer-b5-finetuned-ade-640-640_backup.pt"
 
     continue_run_id = None
-    continue_run_id = "1mx6hjpu"
+    # continue_run_id = "1mx6hjpu"
 
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
