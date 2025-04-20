@@ -129,6 +129,9 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     elif loss_type == 'di_iou':
         # The base signal of ce_loss is needed
         return (1 - alpha) * DiceLoss()(logits, targets) + (alpha-0.1) * IOULoss()(logits, targets) + 0.1 * ce_loss
+    elif loss_type == 'all':
+        # The base signal of ce_loss is needed
+        return 0.3 * DiceLoss()(logits, targets) + 0.3 * IOULoss()(logits, targets) + 0.3 * FocalLoss()(logits, targets) + 0.1 * ce_loss
     # Combined loss
     return (1 - alpha) * ce_loss + alpha * m_loss
 
@@ -406,11 +409,11 @@ if __name__ == '__main__':
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'wt_di_foc'
-    alpha = 0.5
+    loss_type = 'wt_iou'
+    alpha = 0.9
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
-    model_type = 'ex_fusion'
+    model_type = 'fusion'
 
     # Wrap SegFormer with LoRA
     lora_config = None
@@ -427,10 +430,10 @@ if __name__ == '__main__':
     dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -475,7 +478,10 @@ if __name__ == '__main__':
 
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # Below is second best supersegformer
     super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+    # Below is best supersegformer
+    # super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
 
     if (start_net_path is not None):
         lora_config = get_loraconfig_from_path(start_net_path)
