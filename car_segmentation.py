@@ -47,10 +47,12 @@ class IOULoss(nn.Module):
     def forward(self, logits, targets):
         probs = F.softmax(logits, dim=1)
         targets_one_hot = F.one_hot(targets, num_classes=logits.size(1)).permute(0, 3, 1, 2).float()
-        intersection = torch.sum(probs * targets_one_hot, dim=(2, 3))  # Calculate intersection
-        union = torch.sum(probs + targets_one_hot, dim=(2, 3))  # Calculate union
-        iou_score = (intersection + self.smooth) / (union + self.smooth)  # Dice score
-        return 1 - iou_score.mean()  # Dice loss
+
+        intersection = torch.sum(probs * targets_one_hot, dim=(2, 3))
+        union = torch.sum(probs + targets_one_hot, dim=(2, 3)) - intersection
+
+        iou_score = (intersection + self.smooth) / (union + self.smooth)
+        return 1 - iou_score.mean()
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=1, gamma=2, reduction='mean',class_weights=None):
