@@ -3,23 +3,24 @@ import torch
 import numpy as np
 
 # Additional helper functions for metrics
-def pixel_accuracy(predictions, targets):
-    """Calculate Pixel Accuracy"""
-    predictions = predictions.view(-1).cpu().numpy().astype(np.int32)
-    targets = targets.view(-1).cpu().numpy().astype(np.int32)
-    return accuracy_score(targets, predictions)
+# However these metrics are slower and its better to use torchmetrics readymade methods instead
+# def pixel_accuracy(predictions, targets):
+#     """Calculate Pixel Accuracy"""
+#     predictions = predictions.view(-1).cpu().numpy().astype(np.int32)
+#     targets = targets.view(-1).cpu().numpy().astype(np.int32)
+#     return accuracy_score(targets, predictions)
 
-def dice_coefficient(predictions, targets, num_classes):
-    """Calculate Dice Coefficient"""
-    dice_scores = []
-    for class_id in range(num_classes):
-        pred_class = (predictions == class_id).float()
-        target_class = (targets == class_id).float()
-        intersection = torch.sum(pred_class * target_class)
-        union = torch.sum(pred_class) + torch.sum(target_class)
-        dice_score = (2. * intersection + 1e-6) / (union + 1e-6)
-        dice_scores.append(dice_score)
-    return torch.tensor(dice_scores).mean()
+# def dice_coefficient(predictions, targets, num_classes):
+#     """Calculate Dice Coefficient"""
+#     dice_scores = []
+#     for class_id in range(num_classes):
+#         pred_class = (predictions == class_id).float()
+#         target_class = (targets == class_id).float()
+#         intersection = torch.sum(pred_class * target_class)
+#         union = torch.sum(pred_class) + torch.sum(target_class)
+#         dice_score = (2. * intersection + 1e-6) / (union + 1e-6)
+#         dice_scores.append(dice_score)
+#     return torch.tensor(dice_scores).mean()
 
 def get_model_from_path(model,chkpath):
     map_location = torch.device("cuda" if torch.cuda.is_available() else "cpu")
