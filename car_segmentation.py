@@ -61,22 +61,23 @@ class FocalLoss(nn.Module):
         self.class_weights = class_weights
 
     def forward(self, logits, targets):
-        # Apply softmax to logits to get predicted probabilities (logits -> probabilities)
         probs = F.softmax(logits, dim=1)
         targets = targets.long()
 
-        # Select the probabilities corresponding to the true class
-        target_probs = probs.gather(1, targets.unsqueeze(1))  # Shape: (B, 1)
+        # Get the probability of the true class
+        pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # Shape: (B,)
 
-        # Compute Cross-Entropy Loss (for the true class)
-        ce_loss = F.cross_entropy(logits, targets, reduction='none')
+        # Compute log(pt)
+        log_pt = torch.log(pt + 1e-9)
+
+        # Get alpha_t for each sample
         if self.class_weights is not None:
-            weights = self.class_weights[targets]
-            ce_loss = ce_loss * weights
+            alpha_t = self.class_weights[targets]  # Shape: (B,)
+        else:
+            alpha_t = self.alpha
 
-        # Compute Focal Loss
-        focal_loss = self.alpha * (1 - target_probs) ** self.gamma * ce_loss
-
+        # Focal loss
+        focal_loss = -alpha_t * ((1 - pt) ** self.gamma) * log_pt
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
@@ -119,11 +120,11 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
         # Dice Loss
         m_loss = DiceLoss()(logits, targets)
     elif loss_type == 'focal':
-        m_loss = FocalLoss(class_weights=ce_weights)(logits, targets)
+        m_loss = FocalLoss()(logits, targets)
     elif loss_type == 'iou':
         m_loss = IOULoss()(logits, targets)
     elif loss_type == 'di_foc':
-        return (1 - alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss(class_weights=ce_weights)(logits, targets)
+        return (1 - alpha) * DiceLoss()(logits, targets) + alpha * FocalLoss()(logits, targets)
     elif loss_type == 'di_iou':
         return (1 - alpha) * DiceLoss()(logits, targets) + alpha * IOULoss()(logits, targets)
     # Combined loss
@@ -403,8 +404,8 @@ if __name__ == '__main__':
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'wt_focal'
-    alpha = 0.9
+    loss_type = 'di_foc'
+    alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
     model_type = 'fusion'
