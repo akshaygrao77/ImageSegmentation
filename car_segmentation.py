@@ -155,7 +155,6 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     return (1 - alpha) * ce_loss + alpha * m_loss
 
 def get_segformermodel(num_labels, model_name):
-    # nvidia/segformer-b5-finetuned-cityscapes-1024-1024
     model = SegformerForSemanticSegmentation.from_pretrained(model_name, num_labels=num_labels + 1,
                                                            ignore_mismatched_sizes=True)
 
@@ -310,6 +309,8 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
         )
 
     for epoch in range(start_epoch, num_epochs):
+        if(epoch>50):
+            break
         model.train()
         progress_bar = tqdm(train_dataloader, desc=f"Training Epoch {epoch + 1}/{num_epochs}",
                             disable=(accelerator is not None and not accelerator.is_main_process))
@@ -428,10 +429,10 @@ if __name__ == '__main__':
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'wt_di_foc'
+    loss_type = 'wt_all_dynamic'
     alpha = 0.5
 
-    # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion
+    # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion'
     model_type = 'ex_fusion'
 
     # Wrap SegFormer with LoRA
@@ -449,10 +450,10 @@ if __name__ == '__main__':
     dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -535,7 +536,8 @@ if __name__ == '__main__':
             model = Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
                                     len(car_id_to_color) + 1, pretrained_model_name)
             superseg_model_name = pretrained_model_name
-            super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+            # super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+            super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
             super_segmodel = get_segformermodel(len(superseg_id_to_color), superseg_model_name)
             model.model = get_model_from_path(super_segmodel, super_segmodel_path)[0]
             model.model = modify_segformer_output_channels(model.model, len(car_id_to_color) + 1)
