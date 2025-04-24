@@ -4,13 +4,12 @@ from torch import nn
 import numpy as np
 import json
 from structures.dataset_structure import COCOSegmentationDataset
-from structures.heirarchical_seg_model import Fusion_SegModel, Hierarchical_SegModel, MOE_Fusion_SegModel, modify_segformer_output_channels
+from structures.heirarchical_seg_model import Fusion_SegModel, Hierarchical_SegModel, MOE_Fusion_SegModel, BaseSegModel
 from utils.data_preprocessor_utils import *
 from utils.visualize_utils import *
 from torch.utils.data import DataLoader
 
-from peft import LoraConfig, get_peft_model
-from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
+from peft import LoraConfig
 from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 from transformers import AdamW, get_scheduler
 from utils.generic_utils import *
@@ -154,12 +153,6 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     # Combined loss
     return (1 - alpha) * ce_loss + alpha * m_loss
 
-def get_segformermodel(num_labels, model_name):
-    model = SegformerForSemanticSegmentation.from_pretrained(model_name, num_labels=num_labels + 1,
-                                                           ignore_mismatched_sizes=True)
-
-    return model
-
 def gather_if_needed(tensor, accelerator):
     if accelerator is not None:
         return accelerator.gather_for_metrics(tensor)
@@ -198,8 +191,9 @@ def evaluate_model(model, num_labels, val_dataloader, accelerator=None, is_retur
                 loss = accelerator.gather(loss).mean()
             total_loss += loss.item()
 
-            upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
-            predicted = upsampled_logits.argmax(dim=1)
+            # The Baseseg model converts downsized logits to match with image size for universality
+            # upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
+            predicted = logits.argmax(dim=1)
 
             predicted = gather_if_needed(predicted, accelerator)
             masks = gather_if_needed(masks, accelerator)
@@ -429,7 +423,7 @@ if __name__ == '__main__':
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'wt_all_dynamic'
+    loss_type = 'wt_di_foc'
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion'
@@ -450,10 +444,11 @@ if __name__ == '__main__':
     dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    # pretrained_model_name = "facebook/mask2former-swin-large-ade-semantic"
+    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -491,7 +486,7 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=6, pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/fusion/wt_dice_0.9/nvidia_segformer-b5-finetuned-ade-640-640_backup.pt"
+    # start_net_path = "./new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/wt_all_dynamic_0.6/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_backup.pt"
 
     continue_run_id = None
     # continue_run_id = "1mx6hjpu"
@@ -506,16 +501,16 @@ if __name__ == '__main__':
     if (start_net_path is not None):
         lora_config = get_loraconfig_from_path(start_net_path)
 
-    start_epoch = 0
+    start_epoch = -1
     if (model_type is None):
-        model = get_segformermodel(len(car_id_to_color), pretrained_model_name)
+        model = BaseSegModel(len(car_id_to_color)+1, pretrained_model_name)
         save_prefix = "./"
     elif (model_type is not None):
         superseg_ds = "Car_parts_dataset"
         superseg_dir = os.path.join(datadir, superseg_ds)
         superseg_id_to_color = get_colormapping(os.path.join(superseg_dir, get_cocopath(superseg_ds)),
                                                 superseg_dir + "/meta.json")
-        super_segmodel = get_segformermodel(len(superseg_id_to_color), superseg_model_name)
+        super_segmodel = BaseSegModel(len(superseg_id_to_color)+1, superseg_model_name)
         super_segmodel, _, _ = get_model_from_path(super_segmodel, super_segmodel_path)
         save_prefix = super_segmodel_path[:super_segmodel_path.find('.pt')] + "/"
         if (model_type == 'hierarchical'):
@@ -528,22 +523,19 @@ if __name__ == '__main__':
             model = MOE_Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
                                         len(car_id_to_color) + 1, pretrained_model_name)
         elif (model_type == 'extend_tune'):
-            model = modify_segformer_output_channels(super_segmodel, len(car_id_to_color) + 1)
-            if (lora_config is not None):
-                model = get_peft_model(model, lora_config)
-                model_type = 'lr' + model_type
+            model = modify_output_channels(super_segmodel, len(car_id_to_color) + 1,superseg_model_name)
         elif (model_type == 'ex_fusion'):
             model = Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
                                     len(car_id_to_color) + 1, pretrained_model_name)
             superseg_model_name = pretrained_model_name
-            # super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
-            super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
-            super_segmodel = get_segformermodel(len(superseg_id_to_color), superseg_model_name)
+            super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+            # super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
+            super_segmodel = BaseSegModel(len(superseg_id_to_color)+1, superseg_model_name)
             model.model = get_model_from_path(super_segmodel, super_segmodel_path)[0]
-            model.model = modify_segformer_output_channels(model.model, len(car_id_to_color) + 1)
-            if (lora_config is not None):
-                model.model = get_peft_model(model.model, lora_config)
-                model_type = 'lr' + model_type
+            model.model = modify_output_channels(model.model, len(car_id_to_color) + 1,superseg_model_name)
+        if (lora_config is not None):
+            model.initialize_peft_model(lora_config)
+            model_type = 'lr' + model_type
 
     best_perf_metric = 0
     if (start_net_path is not None):
@@ -601,6 +593,10 @@ if __name__ == '__main__':
     model_save_path = os.path.join(model_save_dir, pretrained_model_name.replace("/", "_"))
     is_log_wandb = not (wand_project_name is None)
     if (is_log_wandb and (accelerator is None or accelerator.is_main_process)):
+        if "segformer" in pretrained_model_name:
+            ttmp = pretrained_model_name.find("segformer") + len("segformer") + 1
+        elif "mask2former" in pretrained_model_name:
+            ttmp = pretrained_model_name.find("mask2former") + len("mask2former") + 1
         wandb_config = dict()
         wandb_config["optimizer"] = optimizer
         if(accelerator is not None):
@@ -622,7 +618,7 @@ if __name__ == '__main__':
         wandb_run_name = "high_aug_tnorm_" + ("" if model_type is None else model_type[:7] + "_") + (
             "DMG" if "damage" in dataset else "PRT") + "_" + \
                          pretrained_model_name[
-                         pretrained_model_name.find("segformer") + len("segformer") + 1:pretrained_model_name.find(
+                         ttmp:pretrained_model_name.find(
                              "finetun") - 1] + "_" + \
                          pretrained_model_name[pretrained_model_name.find("finetun") + len("finetuned") + 1:][:4] + \
                          "_" + ("def" if loss_type is None else loss_type + "_" + str(alpha))
@@ -643,5 +639,5 @@ if __name__ == '__main__':
             )
 
     train_model(model, optimizer, lr_scheduler, len(car_id_to_color), num_epochs, tr_cd_dataloader,
-                val_cd_dataloader, model_save_path, dataset, accelerator, wand_project_name, start_epoch,
+                val_cd_dataloader, model_save_path, dataset, accelerator, wand_project_name, start_epoch+1,
                 loss_type, alpha, lora_config, best_perf_metric)

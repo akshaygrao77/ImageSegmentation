@@ -1,26 +1,24 @@
-from sklearn.metrics import accuracy_score,confusion_matrix
 import torch
-import numpy as np
+from structures.heirarchical_seg_model import *
 
-# Additional helper functions for metrics
-# However these metrics are slower and its better to use torchmetrics readymade methods instead
-# def pixel_accuracy(predictions, targets):
-#     """Calculate Pixel Accuracy"""
-#     predictions = predictions.view(-1).cpu().numpy().astype(np.int32)
-#     targets = targets.view(-1).cpu().numpy().astype(np.int32)
-#     return accuracy_score(targets, predictions)
+def modify_output_channels(model, new_num_labels, model_name):
+    internal_model = model
+    # Check if the model is BaseSegModel
+    if isinstance(model,BaseSegModel):
+        internal_model = model.base_model
+    internal_model.config.num_labels = new_num_labels
+    # SegFormer head
+    if 'segformer' in model_name.lower():
+        # Ensure the correct configuration for number of labels
+        internal_model.config.num_labels = new_num_labels
 
-# def dice_coefficient(predictions, targets, num_classes):
-#     """Calculate Dice Coefficient"""
-#     dice_scores = []
-#     for class_id in range(num_classes):
-#         pred_class = (predictions == class_id).float()
-#         target_class = (targets == class_id).float()
-#         intersection = torch.sum(pred_class * target_class)
-#         union = torch.sum(pred_class) + torch.sum(target_class)
-#         dice_score = (2. * intersection + 1e-6) / (union + 1e-6)
-#         dice_scores.append(dice_score)
-#     return torch.tensor(dice_scores).mean()
+        # Update the classifier layer in the decode head
+        internal_model.decode_head.classifier = torch.nn.Conv2d(
+            in_channels=internal_model.decode_head.classifier.in_channels,
+            out_channels=new_num_labels,
+            kernel_size=(1, 1)
+        )
+    return model
 
 def get_model_from_path(model,chkpath):
     map_location = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -33,13 +31,38 @@ def get_model_from_path(model,chkpath):
     # If using DataParallel, remove the 'module.' prefix
     if 'module.' in next(iter(state_dict)):
         state_dict = {key.replace('module.', ''): value for key, value in state_dict.items()}
-    
+    # if not isinstance(model,BaseSegModel):
+    #     print("***********************************************************************************************")
+    #     print(state_dict.keys())
+    #     print("###################################################################################################")
+    #     print(model)
+    #     print(model.state_dict().keys())
+    # 3) build mapping from unwrapped to wrapped keys
+    curr_sd = model.state_dict()
+    unwrap_to_wrap = {}
+    for wrapped_key in curr_sd.keys():
+        if "base_model." in wrapped_key:
+            unwrapped = wrapped_key.replace("base_model.", "")
+            unwrap_to_wrap[unwrapped] = wrapped_key
+
+    # 4) remap saved keys
+    cnt = 0
+    saved_model_dict_keys = list(state_dict.keys())
+    for key in saved_model_dict_keys:
+        if key in unwrap_to_wrap:
+            cnt += 1
+            state_dict[ unwrap_to_wrap[key] ] = state_dict[key]
+            del state_dict[key]
+    # if not isinstance(model,BaseSegModel):
+    #     print(f"================================================================================================== {cnt}")
+    #     print(state_dict.keys())
+
     model.load_state_dict(state_dict)
-    
+
     epoch = checkpoint['epoch']  # Return the epoch if needed
     best_perf_metric = checkpoint['best_perf_metric'] if 'best_perf_metric' in checkpoint else 0.0
     
-    print(f"Model loaded from {chkpath}")
+    print(f"Model loaded from {chkpath} at epoch:{epoch}")
     
     return model, epoch, best_perf_metric
 
