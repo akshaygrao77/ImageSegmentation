@@ -191,9 +191,8 @@ def evaluate_model(model, num_labels, val_dataloader, accelerator=None, is_retur
                 loss = accelerator.gather(loss).mean()
             total_loss += loss.item()
 
-            # The Baseseg model converts downsized logits to match with image size for universality
-            # upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
-            predicted = logits.argmax(dim=1)
+            upsampled_logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
+            predicted = upsampled_logits.argmax(dim=1)
 
             predicted = gather_if_needed(predicted, accelerator)
             masks = gather_if_needed(masks, accelerator)
@@ -326,6 +325,7 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
                     outputs = model(images, labels=masks)
                     loss, logits = outputs.loss.mean(), outputs.logits
                     if loss_type is not None:
+                        # print(f"logits:{logits.size()} masks:{masks.size()} device:{device}")
                         loss = combined_loss(logits, masks, loss_type, dataset, alpha)
 
                     accelerator.backward(loss)
@@ -422,12 +422,12 @@ if __name__ == '__main__':
     wand_project_name = None
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
-    # dice, focal , None , di_foc , iou , di_iou
-    loss_type = 'wt_di_foc'
+    # dice, focal , None , di_foc , iou , di_iou , all_dynamic
+    loss_type = 'wt_all_dynamic'
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion'
-    model_type = 'ex_fusion'
+    model_type = None
 
     # Wrap SegFormer with LoRA
     lora_config = None
@@ -444,8 +444,8 @@ if __name__ == '__main__':
     dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
 
     coco_path = get_cocopath(dataset)
-    # pretrained_model_name = "facebook/mask2former-swin-large-ade-semantic"
-    pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    pretrained_model_name = "facebook/mask2former-swin-large-ade-semantic"
+    # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
@@ -468,7 +468,7 @@ if __name__ == '__main__':
     # accelerator = Accelerator(gradient_accumulation_steps=2)
 
     # Important: BS below 16 causes performance degradation
-    batch_size = 24
+    batch_size = 16
     num_epochs = 80
 
     if(accelerator is not None):
@@ -486,10 +486,10 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=6, pin_memory=True)
 
     start_net_path = None
-    # start_net_path = "./new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/wt_all_dynamic_0.6/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_backup.pt"
+    start_net_path = "./new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/wt_all_dynamic_0.5/facebook_mask2former-swin-large-ade-semantic_backup.pt"
 
     continue_run_id = None
-    # continue_run_id = "1mx6hjpu"
+    continue_run_id = "1f8wsh8h"
 
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"

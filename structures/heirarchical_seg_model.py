@@ -33,7 +33,7 @@ class BaseSegModel(nn.Module):
             self.base_model = SegformerForSemanticSegmentation.from_pretrained(model_name, num_labels=num_labels,
                                                            ignore_mismatched_sizes=ignore_mismatched_sizes)
         elif "mask2former" in model_name:
-            self.base_model = Mask2FormerForUniversalSegmentation.from_pretrained(model_name,num_labels=num_labels,
+            self.base_model = Mask2FormerForUniversalSegmentation.from_pretrained(model_name,num_labels=num_labels-1,
                                                                 ignore_mismatched_sizes=ignore_mismatched_sizes)
         else:
             raise ValueError(f"Wrong model_name:{model_name}. It needs to have be either segformer or mask2former.")
@@ -90,23 +90,34 @@ class BaseSegModel(nn.Module):
             if labels is None:
                 outputs = self.base_model(images, labels=labels)
             else:
+                background_id = 0
                 batch_mask_labels = []
                 batch_class_labels = []
                 for lbl in labels:
                     lbl = lbl.to(images.device)
                     unique_cls = torch.unique(lbl)
-                    masks = []
-                    cls = []
-                    for c in unique_cls:
-                        masks.append((lbl == c).to(torch.float))
-                        cls.append(torch.tensor(c, device=images.device, dtype=torch.long))
-                    batch_mask_labels.append(torch.stack(masks))
-                    batch_class_labels.append(torch.stack(cls))
+                    unique_cls = unique_cls[unique_cls != background_id]
+                    if len(unique_cls) > 0:
+                        masks = []
+                        cls = []
+                        for c in unique_cls:
+                            masks.append((lbl == c).to(torch.float))
+                            cls.append(torch.tensor(c, device=images.device, dtype=torch.long))
+                        masks = torch.stack(masks)
+                        cls = torch.stack(cls)
+                        # print(f"torch.unique(lbl):{torch.unique(lbl)} cls:{cls} masks:{masks.size()} unique cls:{torch.unique(cls)} unique masks:{torch.unique(masks)}")
+                        batch_mask_labels.append(masks)
+                        batch_class_labels.append(cls)
+                    else:
+                        # No objects —> empty tensor for masks and classes
+                        batch_mask_labels.append(torch.empty((0, lbl.shape[0], lbl.shape[1]), dtype=torch.float, device=images.device))
+                        batch_class_labels.append(torch.empty((0,), dtype=torch.long, device=images.device))
                 outputs = self.base_model(
                     pixel_values=images,
                     mask_labels=batch_mask_labels,
                     class_labels=batch_class_labels
                 )
+                # print(f"outputs.masks_queries_logits:{outputs.masks_queries_logits.size()} outputs.class_queries_logits:{outputs.class_queries_logits.size()} device:{outputs.masks_queries_logits.device}")
         loss = outputs.loss.mean() if getattr(outputs, 'loss', None) is not None else None
         logits = self._postprocess_logits(outputs, images)
         return SegmentationOutput(loss=loss, logits=logits)
@@ -118,17 +129,12 @@ class BaseSegModel(nn.Module):
     ) -> torch.Tensor:
         if 'segformer' in self.model_name.lower():
             logits = outputs.logits
-            # Only segformer needs upsampling
-            return F.interpolate(
-                logits,
-                size=pixel_values.shape[-2:],
-                mode='bilinear',
-                align_corners=False
-            )
-        elif 'mask2former' in self.model_name.lower():
-            # Mask2Former: combine masks and class logits
-            pred = outputs.pred_masks
-            cls = outputs.class_queries_logits.softmax(dim=-1)
+            return logits
+        elif 'mask2former' in self.model_name:
+            # correct field names for Mask2Former output
+            pred = outputs.masks_queries_logits
+            cls  = outputs.class_queries_logits.softmax(dim=-1)
+            # combine Q mask-proposals and their class scores into (B, C, H, W)
             return torch.einsum('bqhw,bqc->bchw', pred, cls)
         else:
             raise ValueError(f"Unknown model type '{self.model_name}' in _postprocess_logits")
@@ -160,9 +166,16 @@ class Hierarchical_SegModel(nn.Module):
     def initialize_peft_model(self,lora_config):
         self.model.initialize_peft_model(lora_config)
 
+    def get_mask_from_supermodel(self,inp,masks):
+        with torch.no_grad():  # Ensure superclass model is frozen
+            outputs = self.supersegmodel(inp,masks)
+            upsampled_logits = F.interpolate(outputs.logits, size=inp.shape[-2:], mode="bilinear", align_corners=False)
+        
+        return upsampled_logits
+
     def forward(self, inp, labels=None):
         with torch.no_grad():
-            superseg_masks = self.supersegmodel(inp,None).logits
+            superseg_masks = self.get_mask_from_supermodel(inp,None)
         superseg_masks = self.mask_reducer(superseg_masks)
         # Concatenate the input image with the superclass segmentation masks
         combined_input = torch.cat([inp, superseg_masks], dim=1)  # Shape: (B, C+M, H, W)
@@ -210,13 +223,11 @@ class Fusion_SegModel(nn.Module):
         # Pass the input through the segmentation model
         output = self.model(inp,labels)
         # Concatenate the output masks with the superclass segmentation masks
-        # print(f"superseg_masks:{superseg_masks.size()} output.logits:{output.logits.size()}")
         combined_masks = torch.cat([output.logits, superseg_masks], dim=1)  # Shape: (B, C+M, H, W)
 
         output_logits = self.fusion_layer(combined_masks)
 
-        # The base model returns logits same size as image. So no changes needed
-        # labels = F.interpolate(labels.unsqueeze(1).float(), size=output_logits.shape[-2:], mode="nearest").squeeze(1).long()
+        labels = F.interpolate(labels.unsqueeze(1).float(), size=output_logits.shape[-2:], mode="nearest").squeeze(1).long()
     
         # Cross-Entropy Loss
         ce_loss = F.cross_entropy(output_logits, labels, reduction='mean')
@@ -303,29 +314,32 @@ class MOE_Fusion_SegModel(nn.Module):
         # Adjust segmentation logits to match the supersegmodel's number of classes
         adjusted_segformer_logits = self.adjust_segformer_output(segformer_output.logits)  # Shape: (B, num_labels_superseg, H, W)
 
-        # Gating mechanism: compute gate weights using the image and supersegmodel logits
-        gate_weights = self.gate_network(inp,superseg_logits)  # Shape: (B, 2, H, W)
+        # Upsample superseg_logits to match the segmentation output size
+        upsampled_superseg_logits = F.interpolate(superseg_logits, size=labels.shape[-2:], mode="bilinear", align_corners=False)
+        # Gating mechanism: compute gate weights using the image and upsampled supersegmodel logits
+        gate_weights = self.gate_network(inp,upsampled_superseg_logits)  # Shape: (B, 2, H, W)
 
         # Normalize gate weights (optional: if needed, to ensure sum of weights is 1)
         gate_weights = torch.softmax(gate_weights, dim=1)  # Shape: (B, 2, H, W)
         
-        # Resize gate weights to match the size of superseg_logits and segformer logits (H, W)
+        # Resize gate weights to match the size of superseg_logits and segmentation logits (H, W)
         # Resize gate weights to match logits' spatial dimensions
         gate_weights_resized = F.interpolate(gate_weights, size=superseg_logits.shape[-2:], mode="bilinear", align_corners=False)
 
         # Combine logits using gating weights
         combined_logits = (
             gate_weights_resized[:, 0:1] * superseg_logits +  # Contribution from the super segmentation model
-            gate_weights_resized[:, 1:2] * adjusted_segformer_logits  # Contribution from the SegFormer model
+            gate_weights_resized[:, 1:2] * adjusted_segformer_logits  # Contribution from the segmentation model
         )  # Shape: (B, num_labels_superseg, H, W)
 
         # Optional: Refine combined logits using a fusion layer
         refined_logits = self.fusion_layer(torch.cat([combined_logits, adjusted_segformer_logits], dim=1))
 
-        # Resample labels to match output size. Now since segmentation model logits output same sized output, there is no need for this.
-        # labels = F.interpolate(labels.unsqueeze(1).float(), size=refined_logits.shape[-2:], mode="nearest").squeeze(1).long()
+        # Resample labels to match output size
+        labels = F.interpolate(labels.unsqueeze(1).float(), size=refined_logits.shape[-2:], mode="nearest").squeeze(1).long()
         
         # Compute Cross-Entropy Loss
         ce_loss = F.cross_entropy(refined_logits, labels, reduction='mean')
 
         return FusionSegOutput(loss=ce_loss, logits=refined_logits)
+    

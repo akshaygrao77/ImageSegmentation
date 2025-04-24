@@ -28,8 +28,8 @@ def get_model_from_path(model,chkpath):
     # Load model state dict (strip `module.` for DataParallel models)
     state_dict = checkpoint['model_state_dict']
     
-    # If using DataParallel, remove the 'module.' prefix
-    if 'module.' in next(iter(state_dict)):
+    # If using DataParallel, remove the 'module.' prefix except when using mask2former
+    if not (hasattr(model,"base_model") and isinstance(model.base_model,Mask2FormerForUniversalSegmentation)) and 'module.' in next(iter(state_dict)):
         state_dict = {key.replace('module.', ''): value for key, value in state_dict.items()}
     # if not isinstance(model,BaseSegModel):
     #     print("***********************************************************************************************")
