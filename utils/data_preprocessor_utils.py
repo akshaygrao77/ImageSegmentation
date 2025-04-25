@@ -52,5 +52,8 @@ def get_cocopath(dataset):
         coco_path = "val.json"
     elif(dataset == "Car_DD_dataset"):
         coco_path = "val.json"
-
+    elif(dataset == "roboflow_vehicle_damage"):
+        coco_path = "val.json"
+    elif(dataset == "roboflow_dmg_merged_carDD"):
+        coco_path = "val.json"
     return coco_path

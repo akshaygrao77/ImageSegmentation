@@ -43,16 +43,14 @@ def merge_coco_datasets(dataset1_path, dataset2_path, output_path, category_mapp
 
     for ann in data2["annotations"]:
         old_cat_name = name_to_id_data2[ann["category_id"]]
-        if old_cat_name not in category_mapping:
-            raise ValueError(f"Category '{old_cat_name}' in dataset2 is not mapped to dataset1 categories.")
-        
-        new_cat_name = category_mapping[old_cat_name]
-        ann["category_id"] = name_to_id_data1[new_cat_name]
-        ann["image_id"] = image_id_mapping[ann["image_id"]]
-        max_ann_id += 1
-        ann["id"] = max_ann_id
-        ann[original_group_key] = 1
-        new_annotations.append(ann)
+        if old_cat_name in category_mapping:
+            new_cat_name = category_mapping[old_cat_name]
+            ann["category_id"] = name_to_id_data1[new_cat_name]
+            ann["image_id"] = image_id_mapping[ann["image_id"]]
+            max_ann_id += 1
+            ann["id"] = max_ann_id
+            ann[original_group_key] = 1
+            new_annotations.append(ann)
 
     # Merge all
     merged = {
@@ -68,17 +66,32 @@ def merge_coco_datasets(dataset1_path, dataset2_path, output_path, category_mapp
     print(f"✅ Merged dataset saved to: {output_path}")
 
 if __name__=='__main__':
+    # category_mapping = {
+    # "tire flat": "Broken part",
+    # "lamp broken": "Broken part",
+    # "glass shatter": "Broken part",
+    # "crack": "Cracked",
+    # "scratch": "Scratch",
+    # "dent": "Dent"
+    # }
+    # merge_coco_datasets(
+    #     dataset1_path="/home/akshay/dgx-code/ImageSegmentation/data/car-parts-and-car-damages/Car_damages_dataset/split_annotations/train.json",
+    #     dataset2_path="/home/akshay/dgx-code/ImageSegmentation/data/CarDD_release/CarDD_COCO/annotations/instances_train2017.json",
+    #     output_path="/home/akshay/dgx-code/ImageSegmentation/data/car_damage_merged/merged_annotations_train.json",
+    #     category_mapping=category_mapping
+    # )
+
     category_mapping = {
-    "tire flat": "Broken part",
-    "lamp broken": "Broken part",
-    "glass shatter": "Broken part",
-    "crack": "Cracked",
-    "scratch": "Scratch",
-    "dent": "Dent"
+    "windshield_damage":"glass shatter",
+    "slight_scratch":"scratch",
+    "severe_scratch":"scratch",
+    "medium_deformation":"dent",
+    "severe_deformation":"dent",
+    "slight_deformation":"dent",
     }
     merge_coco_datasets(
-        dataset1_path="/home/akshay/dgx-code/ImageSegmentation/data/car-parts-and-car-damages/Car_damages_dataset/split_annotations/train.json",
-        dataset2_path="/home/akshay/dgx-code/ImageSegmentation/data/CarDD_release/CarDD_COCO/annotations/instances_train2017.json",
-        output_path="/home/akshay/dgx-code/ImageSegmentation/data/car_damage_merged/merged_annotations_train.json",
+        dataset1_path="/home/akshay/dgx-code/ImageSegmentation/data/CarDD_release/CarDD_COCO/split_annotations/val.json",
+        dataset2_path="/home/akshay/dgx-code/ImageSegmentation/data/car-parts-and-car-damages/roboflow_vehicle_damage/split_annotations/val.json",
+        output_path="/home/akshay/dgx-code/ImageSegmentation/data/roboflow_merged_carDD/val.json",
         category_mapping=category_mapping
     )

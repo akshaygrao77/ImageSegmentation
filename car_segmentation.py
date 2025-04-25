@@ -111,6 +111,13 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     elif dataset == "Car_DD_dataset":
         # Median balanced weights pre-computed
         median_weights = torch.tensor([ 0.0736,  0.9922,  1.0000, 39.6112,  0.6244,  1.8201,  2.3304], device=logits.device)
+    elif dataset == "roboflow_vehicle_damage":
+        # Median balanced weights pre-computed
+        median_weights = torch.tensor([0.0982, 1.1302, 0.8967, 0.5145, 2.1323, 1.3436, 1.2590, 0.3608], device=logits.device)
+    elif dataset == "roboflow_dmg_merged_carDD":
+        # Median balanced weights pre-computed
+        median_weights = torch.tensor([9.4404e-02, 4.4662e-01, 1.0000e+00, 1.0283e+02, 5.0864e-01, 4.7249e+00,
+        6.0495e+00], device=logits.device)
     ce_weights = None
     if "wt_" in loss_type:
         if "wt_i_" in loss_type:
@@ -443,8 +450,8 @@ if __name__ == '__main__':
     #     bias="none"  # No bias added
     # )
 
-    # Car_damages_dataset, Car_parts_dataset , CarDNN_Kaggle_merged_Car_damages_dataset , Car_DD_dataset
-    dataset = "Car_DD_dataset"
+    # Car_damages_dataset, Car_parts_dataset , CarDNN_Kaggle_merged_Car_damages_dataset , Car_DD_dataset , roboflow_vehicle_damage , roboflow_dmg_merged_carDD
+    dataset = "roboflow_dmg_merged_carDD"
 
     coco_path = get_cocopath(dataset)
     # pretrained_model_name = "facebook/mask2former-swin-large-ade-semantic"
@@ -462,6 +469,10 @@ if __name__ == '__main__':
                     os.path.join("./data/CarDD_release/", "CarDD_COCO/")]
     if (dataset == "Car_DD_dataset"):
         car_dirs = [os.path.join("./data/CarDD_release/", "CarDD_COCO/")]
+    elif (dataset == "roboflow_vehicle_damage"):
+        car_dirs = ["./data/roboflow_vehicle_damage/"]
+    elif (dataset == "roboflow_dmg_merged_carDD"):
+        car_dirs = [os.path.join("./data/CarDD_release/", "CarDD_COCO/"),"./data/roboflow_vehicle_damage/"]
 
     car_imgs = []
     for car_dir in car_dirs:
@@ -495,10 +506,10 @@ if __name__ == '__main__':
     version = "V1"
 
     start_net_path = None
-    start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/Car_DD_dataset/fusion/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_backup.pt"
+    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/Car_DD_dataset/fusion/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_backup.pt"
 
     continue_run_id = None
-    continue_run_id = "1my71l1p"
+    # continue_run_id = "1my71l1p"
 
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
