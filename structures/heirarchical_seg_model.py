@@ -109,6 +109,7 @@ class BaseSegModel(nn.Module):
                         batch_mask_labels.append(masks)
                         batch_class_labels.append(cls)
                     else:
+                        print("WARN: Empty no object classes encountered!")
                         # No objects —> empty tensor for masks and classes
                         batch_mask_labels.append(torch.empty((0, lbl.shape[0], lbl.shape[1]), dtype=torch.float, device=images.device))
                         batch_class_labels.append(torch.empty((0,), dtype=torch.long, device=images.device))

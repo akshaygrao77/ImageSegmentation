@@ -108,6 +108,9 @@ def combined_loss(logits, targets, loss_type, dataset, alpha=0.5):
     elif dataset == "Car_parts_dataset":
         # Median balanced weights pre-computed
         median_weights = torch.tensor([0.04713219181108924,0.46780447957804006,0.8226677237979122,2.295045034695851,1.6657497540963886,0.3523892849398128,0.6480218689411196,0.7877552602216747,0.3301445520518123,1.5692173388105741,4.9711122707088915,3.11386416386265,1.6210466382167426,0.49036456494308545,1.1161060908411526,3.5601432517995577,0.7916959768684058,6.8852797356351045,2.837301590521953,0.6831727317740973,0.9057742712114433,1.854989695026368], device=logits.device)
+    elif dataset == "Car_DD_dataset":
+        # Median balanced weights pre-computed
+        median_weights = torch.tensor([ 0.0736,  0.9922,  1.0000, 39.6112,  0.6244,  1.8201,  2.3304], device=logits.device)
     ce_weights = None
     if "wt_" in loss_type:
         if "wt_i_" in loss_type:
@@ -427,7 +430,7 @@ if __name__ == '__main__':
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion'
-    model_type = None
+    model_type = 'fusion'
 
     # Wrap SegFormer with LoRA
     lora_config = None
@@ -440,15 +443,15 @@ if __name__ == '__main__':
     #     bias="none"  # No bias added
     # )
 
-    # Car_damages_dataset, Car_parts_dataset , CarDNN_Kaggle_merged_Car_damages_dataset
-    dataset = "CarDNN_Kaggle_merged_Car_damages_dataset"
+    # Car_damages_dataset, Car_parts_dataset , CarDNN_Kaggle_merged_Car_damages_dataset , Car_DD_dataset
+    dataset = "Car_DD_dataset"
 
     coco_path = get_cocopath(dataset)
-    pretrained_model_name = "facebook/mask2former-swin-large-ade-semantic"
+    # pretrained_model_name = "facebook/mask2former-swin-large-ade-semantic"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -457,6 +460,8 @@ if __name__ == '__main__':
     elif (dataset == "CarDNN_Kaggle_merged_Car_damages_dataset"):
         car_dirs = [os.path.join(datadir, "Car_damages_dataset"),
                     os.path.join("./data/CarDD_release/", "CarDD_COCO/")]
+    if (dataset == "Car_DD_dataset"):
+        car_dirs = [os.path.join("./data/CarDD_release/", "CarDD_COCO/")]
 
     car_imgs = []
     for car_dir in car_dirs:
@@ -468,7 +473,7 @@ if __name__ == '__main__':
     # accelerator = Accelerator(gradient_accumulation_steps=2)
 
     # Important: BS below 16 causes performance degradation
-    batch_size = 16
+    batch_size = 24
     num_epochs = 80
 
     if(accelerator is not None):
@@ -486,10 +491,10 @@ if __name__ == '__main__':
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=6, pin_memory=True)
 
     start_net_path = None
-    start_net_path = "./new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/wt_all_dynamic_0.5/facebook_mask2former-swin-large-ade-semantic_backup.pt"
+    # start_net_path = "./new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/wt_all_dynamic_0.5/facebook_mask2former-swin-large-ade-semantic_backup.pt"
 
     continue_run_id = None
-    continue_run_id = "1f8wsh8h"
+    # continue_run_id = "1f8wsh8h"
 
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"

@@ -50,5 +50,7 @@ def get_cocopath(dataset):
         coco_path = "coco_parts_annotations.json"
     elif(dataset == "CarDNN_Kaggle_merged_Car_damages_dataset"):
         coco_path = "val.json"
+    elif(dataset == "Car_DD_dataset"):
+        coco_path = "val.json"
 
     return coco_path
