@@ -426,7 +426,7 @@ if __name__ == '__main__':
     wand_project_name = "new_Car_Damage_Segmentation"
     # Any loss involving focal or cce loss can receive 'wt_' in its loss function to consider the median balancing weights as class weights
     # dice, focal , None , di_foc , iou , di_iou , all_dynamic
-    loss_type = 'wt_all_dynamic'
+    loss_type = "wt_all_dynamic"
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion'
@@ -490,11 +490,15 @@ if __name__ == '__main__':
                                   pin_memory=True)
     val_cd_dataloader = DataLoader(val_car_dataset, batch_size=batch_size, num_workers=6, pin_memory=True)
 
+    # "V1" , "V2"
+    # V1 works the best. V2 though the standard suggested by AI models doesn't work well.
+    version = "V1"
+
     start_net_path = None
-    # start_net_path = "./new_checkpoints/high_aug_tnorm_/CarDNN_Kaggle_merged_Car_damages_dataset/wt_all_dynamic_0.5/facebook_mask2former-swin-large-ade-semantic_backup.pt"
+    start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/Car_DD_dataset/fusion/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_backup.pt"
 
     continue_run_id = None
-    # continue_run_id = "1f8wsh8h"
+    continue_run_id = "1my71l1p"
 
     superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
@@ -502,6 +506,7 @@ if __name__ == '__main__':
     super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
     # Below is best supersegformer
     # super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
+    # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
 
     if (start_net_path is not None):
         lora_config = get_loraconfig_from_path(start_net_path)
@@ -511,6 +516,7 @@ if __name__ == '__main__':
         model = BaseSegModel(len(car_id_to_color)+1, pretrained_model_name)
         save_prefix = "./"
     elif (model_type is not None):
+        # Car_DD_dataset , Car_parts_dataset
         superseg_ds = "Car_parts_dataset"
         superseg_dir = os.path.join(datadir, superseg_ds)
         superseg_id_to_color = get_colormapping(os.path.join(superseg_dir, get_cocopath(superseg_ds)),
@@ -535,6 +541,7 @@ if __name__ == '__main__':
             superseg_model_name = pretrained_model_name
             super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
             # super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
+            # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
             super_segmodel = BaseSegModel(len(superseg_id_to_color)+1, superseg_model_name)
             model.model = get_model_from_path(super_segmodel, super_segmodel_path)[0]
             model.model = modify_output_channels(model.model, len(car_id_to_color) + 1,superseg_model_name)
@@ -545,26 +552,49 @@ if __name__ == '__main__':
     best_perf_metric = 0
     if (start_net_path is not None):
         model, start_epoch, best_perf_metric = get_model_from_path(model, start_net_path)
-    # Define optimizer and learning rate scheduler
-    optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
-
-    # Set up the learning rate scheduler
+    
     num_training_steps = num_epochs * len(tr_cd_dataloader)
     if (accelerator is None or accelerator.is_main_process):
         print("num_training_steps ", num_training_steps, num_epochs * len(tr_cd_dataloader), car_id_to_color)
-    # lr_scheduler = get_scheduler(
-    #     name="linear",
-    #     optimizer=optimizer,
-    #     num_warmup_steps=200,
-    #     num_training_steps=num_training_steps,
-    # )
 
-    lr_scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
-        optimizer=optimizer,
-        num_warmup_steps=int(0.1 * num_training_steps), # 10% of training time increase LR linearly
-        num_training_steps=num_training_steps,
-        num_cycles = (num_epochs//4) # In the remaining 90% time of training, hop every 4 epoch
-    )
+    if version == "V1":
+        # Define optimizer and learning rate scheduler
+        optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
+
+        # Set up the learning rate scheduler
+        lr_scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=int(0.1 * num_training_steps), # 10% of training time increase LR linearly
+            num_training_steps=num_training_steps,
+            num_cycles = (num_epochs//4) # In the remaining 90% time of training, hop every 4 epoch
+        )
+    elif(version == "V2"):
+        # Recommended defaults
+        if 'mask2former' in pretrained_model_name.lower():
+            lr = 1e-4
+            weight_decay = 0.05
+            scheduler_type = "polynomial"  # poly decay + warmup (power=0.9)
+        elif 'segformer' in pretrained_model_name.lower():
+            lr = 6e-5
+            weight_decay = 0.01
+            scheduler_type = "polynomial"
+        else:
+            raise ValueError(f"Unsupported model name: {pretrained_model_name}")
+
+        # Setup optimizer
+        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+        # Training steps
+        num_warmup_steps = int(0.1 * num_training_steps)
+
+        # Scheduler setup
+        lr_scheduler = get_scheduler(
+            name=scheduler_type,
+            optimizer=optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
+
     if(start_net_path is not None):
         optimizer,lr_scheduler = get_optimizers_from_path(optimizer, lr_scheduler, start_net_path)
 

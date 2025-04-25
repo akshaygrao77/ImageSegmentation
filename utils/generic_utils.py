@@ -54,7 +54,7 @@ def get_model_from_path(model,chkpath):
             state_dict[ unwrap_to_wrap[key] ] = state_dict[key]
             del state_dict[key]
     # if not isinstance(model,BaseSegModel):
-    #     print(f"================================================================================================== {cnt}")
+    print(f"================================================================================================== {cnt}")
     #     print(state_dict.keys())
 
     model.load_state_dict(state_dict)
