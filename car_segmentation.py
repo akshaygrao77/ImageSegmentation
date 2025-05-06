@@ -427,6 +427,40 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
         
     return
 
+def generate_model_based_on_model_type(model_type, car_id_to_color, pretrained_model_name, datadir, super_segmodel_path = None, superseg_ds = "Car_parts_dataset"):
+    if (model_type is None):
+        model = BaseSegModel(len(car_id_to_color)+1, pretrained_model_name)
+        save_prefix = "./"
+    elif (model_type is not None):
+        assert super_segmodel_path is not None, "super_segmodel_path is None"
+        # Car_DD_dataset , Car_parts_dataset
+        superseg_dir = os.path.join(datadir, superseg_ds)
+        superseg_id_to_color = get_colormapping(os.path.join(superseg_dir, get_cocopath(superseg_ds)),
+                                                superseg_dir + "/meta.json")
+        super_segmodel = BaseSegModel(len(superseg_id_to_color)+1, superseg_model_name)
+        super_segmodel, _, _ = get_model_from_path(super_segmodel, super_segmodel_path)
+        save_prefix = super_segmodel_path[:super_segmodel_path.find('.pt')] + "/"
+        if (model_type == 'hierarchical'):
+            model = Hierarchical_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
+                                          len(car_id_to_color) + 1, pretrained_model_name)
+        elif (model_type == 'fusion'):
+            model = Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
+                                    len(car_id_to_color) + 1, pretrained_model_name)
+        elif (model_type == 'moe_fusion'):
+            model = MOE_Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
+                                        len(car_id_to_color) + 1, pretrained_model_name)
+        elif (model_type == 'extend_tune'):
+            model = modify_output_channels(super_segmodel, len(car_id_to_color) + 1,superseg_model_name)
+        elif (model_type == 'ex_fusion'):
+            model = Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
+                                    len(car_id_to_color) + 1, pretrained_model_name)
+            superseg_model_name = pretrained_model_name
+            super_segmodel = BaseSegModel(len(superseg_id_to_color)+1, superseg_model_name)
+            model.model = get_model_from_path(super_segmodel, super_segmodel_path)[0]
+            model.model = modify_output_channels(model.model, len(car_id_to_color) + 1,superseg_model_name)
+    
+    return model,save_prefix
+
 if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
     wand_project_name = None
@@ -437,7 +471,7 @@ if __name__ == '__main__':
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion'
-    model_type = 'fusion'
+    model_type = None
 
     # Wrap SegFormer with LoRA
     lora_config = None
@@ -451,14 +485,17 @@ if __name__ == '__main__':
     # )
 
     # Car_damages_dataset, Car_parts_dataset , CarDNN_Kaggle_merged_Car_damages_dataset , Car_DD_dataset , roboflow_vehicle_damage , roboflow_dmg_merged_carDD
-    dataset = "roboflow_dmg_merged_carDD"
+    dataset = "Car_DD_dataset"
 
     coco_path = get_cocopath(dataset)
     # pretrained_model_name = "facebook/mask2former-swin-large-ade-semantic"
+    pretrained_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
+    # pretrained_model_name = "nvidia/segformer-b1-finetuned-ade-512-512"
+    # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -506,59 +543,30 @@ if __name__ == '__main__':
     version = "V1"
 
     start_net_path = None
-    # start_net_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90/new_checkpoints/high_aug_tnorm_/Car_DD_dataset/fusion/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_backup.pt"
+    # start_net_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_backup.pt"
 
     continue_run_id = None
-    # continue_run_id = "1my71l1p"
+    # continue_run_id = "29puyrds"
 
-    superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
-    # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    superseg_ds = "Car_parts_dataset"
+    # superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+    superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     # Below is second best supersegformer
-    super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+    # super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
     # Below is best supersegformer
-    # super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
+    super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
+    # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
+    # super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
     # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
 
     if (start_net_path is not None):
         lora_config = get_loraconfig_from_path(start_net_path)
 
     start_epoch = -1
-    if (model_type is None):
-        model = BaseSegModel(len(car_id_to_color)+1, pretrained_model_name)
-        save_prefix = "./"
-    elif (model_type is not None):
-        # Car_DD_dataset , Car_parts_dataset
-        superseg_ds = "Car_parts_dataset"
-        superseg_dir = os.path.join(datadir, superseg_ds)
-        superseg_id_to_color = get_colormapping(os.path.join(superseg_dir, get_cocopath(superseg_ds)),
-                                                superseg_dir + "/meta.json")
-        super_segmodel = BaseSegModel(len(superseg_id_to_color)+1, superseg_model_name)
-        super_segmodel, _, _ = get_model_from_path(super_segmodel, super_segmodel_path)
-        save_prefix = super_segmodel_path[:super_segmodel_path.find('.pt')] + "/"
-        if (model_type == 'hierarchical'):
-            model = Hierarchical_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
-                                          len(car_id_to_color) + 1, pretrained_model_name)
-        elif (model_type == 'fusion'):
-            model = Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
-                                    len(car_id_to_color) + 1, pretrained_model_name)
-        elif (model_type == 'moe_fusion'):
-            model = MOE_Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
-                                        len(car_id_to_color) + 1, pretrained_model_name)
-        elif (model_type == 'extend_tune'):
-            model = modify_output_channels(super_segmodel, len(car_id_to_color) + 1,superseg_model_name)
-        elif (model_type == 'ex_fusion'):
-            model = Fusion_SegModel(super_segmodel, len(superseg_id_to_color) + 1,
-                                    len(car_id_to_color) + 1, pretrained_model_name)
-            superseg_model_name = pretrained_model_name
-            super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
-            # super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
-            # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
-            super_segmodel = BaseSegModel(len(superseg_id_to_color)+1, superseg_model_name)
-            model.model = get_model_from_path(super_segmodel, super_segmodel_path)[0]
-            model.model = modify_output_channels(model.model, len(car_id_to_color) + 1,superseg_model_name)
-        if (lora_config is not None):
-            model.initialize_peft_model(lora_config)
-            model_type = 'lr' + model_type
+    model,save_prefix = generate_model_based_on_model_type(model_type, car_id_to_color, pretrained_model_name, datadir, super_segmodel_path, superseg_ds)
+    if (lora_config is not None):
+        model.initialize_peft_model(lora_config)
+        model_type = 'lr' + model_type
 
     best_perf_metric = 0
     if (start_net_path is not None):
