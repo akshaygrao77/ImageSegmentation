@@ -427,7 +427,7 @@ def train_model(model, optimizer, lr_scheduler, num_labels, num_epochs, train_da
         
     return
 
-def generate_model_based_on_model_type(model_type, car_id_to_color, pretrained_model_name, datadir, super_segmodel_path = None, superseg_ds = "Car_parts_dataset"):
+def generate_model_based_on_model_type(model_type, car_id_to_color, pretrained_model_name, datadir,superseg_model_name, super_segmodel_path = None, superseg_ds = "Car_parts_dataset"):
     if (model_type is None):
         model = BaseSegModel(len(car_id_to_color)+1, pretrained_model_name)
         save_prefix = "./"
@@ -471,7 +471,7 @@ if __name__ == '__main__':
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion'
-    model_type = None
+    model_type = 'fusion'
 
     # Wrap SegFormer with LoRA
     lora_config = None
@@ -489,13 +489,14 @@ if __name__ == '__main__':
 
     coco_path = get_cocopath(dataset)
     # pretrained_model_name = "facebook/mask2former-swin-large-ade-semantic"
-    pretrained_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
+    # pretrained_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b1-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    pretrained_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -521,7 +522,7 @@ if __name__ == '__main__':
     # accelerator = Accelerator(gradient_accumulation_steps=2)
 
     # Important: BS below 16 causes performance degradation
-    batch_size = 24
+    batch_size = 16
     num_epochs = 80
 
     if(accelerator is not None):
@@ -551,19 +552,22 @@ if __name__ == '__main__':
     superseg_ds = "Car_parts_dataset"
     # superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    superseg_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
     # Below is second best supersegformer
     # super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
+    super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_parts_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
     # Below is best supersegformer
-    super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
+    # super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
     # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
     # super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
     # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
+    super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_parts_dataset/wt_all_dynamic_0.5/nvidia_segformer-b0-finetuned-ade-512-512_best.pt"
 
     if (start_net_path is not None):
         lora_config = get_loraconfig_from_path(start_net_path)
 
     start_epoch = -1
-    model,save_prefix = generate_model_based_on_model_type(model_type, car_id_to_color, pretrained_model_name, datadir, super_segmodel_path, superseg_ds)
+    model,save_prefix = generate_model_based_on_model_type(model_type, car_id_to_color, pretrained_model_name, datadir,superseg_model_name, super_segmodel_path, superseg_ds)
     if (lora_config is not None):
         model.initialize_peft_model(lora_config)
         model_type = 'lr' + model_type

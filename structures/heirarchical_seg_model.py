@@ -219,6 +219,7 @@ class Fusion_SegModel(nn.Module):
         self.model.initialize_peft_model(lora_config)
 
     def forward(self, inp, labels):
+        ce_loss = None
         with torch.no_grad():
             superseg_masks = self.supersegmodel(inp).logits
         # Pass the input through the segmentation model
@@ -228,10 +229,11 @@ class Fusion_SegModel(nn.Module):
 
         output_logits = self.fusion_layer(combined_masks)
 
-        labels = F.interpolate(labels.unsqueeze(1).float(), size=output_logits.shape[-2:], mode="nearest").squeeze(1).long()
-    
-        # Cross-Entropy Loss
-        ce_loss = F.cross_entropy(output_logits, labels, reduction='mean')
+        if labels is not None:
+            labels = F.interpolate(labels.unsqueeze(1).float(), size=output_logits.shape[-2:], mode="nearest").squeeze(1).long()
+        
+            # Cross-Entropy Loss
+            ce_loss = F.cross_entropy(output_logits, labels, reduction='mean')
 
         return FusionSegOutput(loss=ce_loss, logits=output_logits)
 
@@ -305,6 +307,7 @@ class MOE_Fusion_SegModel(nn.Module):
         self.model.initialize_peft_model(lora_config)
 
     def forward(self, inp, labels):
+        ce_loss = None
         # Get logits from the super segmentation model
         with torch.no_grad():
             superseg_logits = self.supersegmodel(inp).logits  # Shape: (B, num_labels_superseg, H, W)
@@ -335,12 +338,12 @@ class MOE_Fusion_SegModel(nn.Module):
 
         # Optional: Refine combined logits using a fusion layer
         refined_logits = self.fusion_layer(torch.cat([combined_logits, adjusted_segformer_logits], dim=1))
-
-        # Resample labels to match output size
-        labels = F.interpolate(labels.unsqueeze(1).float(), size=refined_logits.shape[-2:], mode="nearest").squeeze(1).long()
-        
-        # Compute Cross-Entropy Loss
-        ce_loss = F.cross_entropy(refined_logits, labels, reduction='mean')
+        if labels is not None:
+            # Resample labels to match output size
+            labels = F.interpolate(labels.unsqueeze(1).float(), size=refined_logits.shape[-2:], mode="nearest").squeeze(1).long()
+            
+            # Compute Cross-Entropy Loss
+            ce_loss = F.cross_entropy(refined_logits, labels, reduction='mean')
 
         return FusionSegOutput(loss=ce_loss, logits=refined_logits)
     

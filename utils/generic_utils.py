@@ -93,3 +93,15 @@ def get_optimizers_from_path(optimizer, lr_scheduler, chkpath):
     print(f"Optimizer and LR scheduler loaded from {chkpath}")
     
     return optimizer, lr_scheduler
+
+def get_teacher_path_from_path(chkpath):
+    map_location = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Load checkpoint
+    checkpoint = torch.load(chkpath, map_location=map_location)
+    
+    teacher_path = None
+
+    if "teacher_path"  in checkpoint:
+        teacher_path = checkpoint['teacher_path']
+    
+    return teacher_path
