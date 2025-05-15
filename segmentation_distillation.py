@@ -41,29 +41,28 @@ def distillation_losses(gt_loss,distill_config,teacher_logits,student_logits,fea
     alpha_feat = distill_config.get("alpha_feat", 0.25)
 
     feat_loss = 0.0
-    if alpha_feat > 0:
-        for t_layer, s_layer in distill_config.get("feature_layers", []):
-            t_feat = feature_maps["teacher"][t_layer]
-            s_feat = feature_maps["student"][s_layer]
-            # Unpack tuple outputs
-            if isinstance(t_feat, (list, tuple)):
-                t_feat = t_feat[0]
-            if isinstance(s_feat, (list, tuple)):
-                s_feat = s_feat[0]
-            # Apply projection if shape mismatch
-            if t_feat.shape != s_feat.shape:
-                tmp = s_layer.replace(".","___")
-                if tmp in student_projections:
-                    proj = student_projections[tmp]
-                else:
-                    raise ValueError("Key :{tmp} was not found in student_projections")
-                if proj is not None:
-                    # Align dtype: cast s_feat to proj dtype, apply projection, then cast back
-                    orig_dtype = s_feat.dtype
-                    target_dtype = next(proj.parameters()).dtype
-                    s_feat_cast = s_feat.to(target_dtype)
-                    s_feat = proj(s_feat_cast).to(orig_dtype)
-            feat_loss += distill_config.get("feature_loss_fn", F.mse_loss)(s_feat, t_feat)
+    for t_layer, s_layer in distill_config.get("feature_layers", []):
+        t_feat = feature_maps["teacher"][t_layer]
+        s_feat = feature_maps["student"][s_layer]
+        # Unpack tuple outputs
+        if isinstance(t_feat, (list, tuple)):
+            t_feat = t_feat[0]
+        if isinstance(s_feat, (list, tuple)):
+            s_feat = s_feat[0]
+        # Apply projection if shape mismatch
+        if t_feat.shape != s_feat.shape:
+            tmp = s_layer.replace(".","___")
+            if tmp in student_projections:
+                proj = student_projections[tmp]
+            else:
+                raise ValueError("Key :{tmp} was not found in student_projections")
+            if proj is not None:
+                # Align dtype: cast s_feat to proj dtype, apply projection, then cast back
+                orig_dtype = s_feat.dtype
+                target_dtype = next(proj.parameters()).dtype
+                s_feat_cast = s_feat.to(target_dtype)
+                s_feat = proj(s_feat_cast).to(orig_dtype)
+        feat_loss += distill_config.get("feature_loss_fn", F.mse_loss)(s_feat, t_feat)
 
     run_gtl = 0.99 * run_gtl + 0.01 * gt_loss.detach()
     run_fl = 0.99 * run_fl + 0.01 * feat_loss.detach()
@@ -310,6 +309,8 @@ def get_matching_layers(teacher: nn.Module, student: nn.Module, capture_list: Li
 def get_feature_map_capture_list_for_model_type(model:nn.Module):
     if isinstance(model,Fusion_SegModel):
         return ["SegformerOverlapPatchEmbeddings","SegformerLayer","SegformerMLP"]
+    elif isinstance(model,BaseSegModel):
+        return ["SegformerOverlapPatchEmbeddings","SegformerLayer","SegformerMLP"]
 
 if __name__ == '__main__':
     os.environ["TMPDIR"] = "./tmp"
@@ -331,10 +332,12 @@ if __name__ == '__main__':
     teacher_model_type = 'fusion'
     teacher_pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     # Path will be overridden if student model was saved and loaded
+    # teacher_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
     teacher_path = "./new_checkpoints/high_aug_tnorm_/Car_parts_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best/new_checkpoints/high_aug_tnorm_/Car_DD_dataset/fusion/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
     teacher_superseg_ds = "Car_parts_dataset"
     # teacher_superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     teacher_superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    teacher_super_segmodel_path = None
     # Below is second best supersegformer
     # teacher_super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
     # Below is best supersegformer
@@ -351,6 +354,7 @@ if __name__ == '__main__':
     # student_path = ""
     student_superseg_ds = "Car_parts_dataset"
     student_superseg_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
+    student_super_segmodel_path = None
     student_super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_parts_dataset/wt_all_dynamic_0.5/nvidia_segformer-b0-finetuned-ade-512-512_best.pt"
     # =======================================================
 
@@ -420,10 +424,10 @@ if __name__ == '__main__':
 
     # Example distillation configuration:
     distillation_config = {
-        "temperature": 1.0,
-        "alpha_ce": 0.5,
-        "alpha_kd": 0.5,
-        "alpha_feat": 0.,
+        "temperature": 2.0,
+        "alpha_ce": 0.33,
+        "alpha_kd": 0.33,
+        "alpha_feat": 0.33,
         "feature_layers": match_feature_layers,
         "feature_loss_fn": F.mse_loss,
         "attn_loss_fn": lambda s, t: F.kl_div(
@@ -478,8 +482,9 @@ if __name__ == '__main__':
         print(f"teacher_model.named_modules:{dict(teacher_model.named_modules()).keys()}")
     
     stmp = teacher_path[:teacher_path.find('.pt')] + "/"
+    dist_name = f"tmp_{distillation_config.get('temperature',0)}_pure_{distillation_config.get('alpha_ce',0)}_kl_{distillation_config.get('alpha_kd',0)}_flos_{distillation_config.get('alpha_feat',0)}"
     model_save_dir = os.path.join(
-        os.path.join(student_save_prefix+"/"+ stmp + "distillation_kl_cce/",
+        os.path.join(student_save_prefix+"/"+ stmp + dist_name + "/",
                      dataset + ("" if student_model_type is None else "/" + student_model_type[:7])),
         "default" if loss_type is None else (loss_type + "_" + str(alpha)))
     os.makedirs(model_save_dir, exist_ok=True)
@@ -521,9 +526,10 @@ if __name__ == '__main__':
         wandb_config["student_model_type"] = student_model_type
         wandb_config["teacher_model_type"] = teacher_model_type
         wandb_config["distillation_config"] = distillation_config
+        wandb_config["dist_name"] = dist_name
         wandb_config["teacher_super_segmodel_path"] = '' if teacher_model_type is None else teacher_super_segmodel_path
         wandb_config["student_super_segmodel_path"] = '' if student_model_type is None else student_super_segmodel_path
-        wandb_run_name = "high_aug_tnorm_" + ("" if student_model_type is None else student_model_type[:7] + "_") + (
+        wandb_run_name = dist_name + ("" if student_model_type is None else student_model_type[:7] + "_") + (
             "DMG" if "damage" in dataset else "PRT") + "_" + \
                          student_pretrained_model_name[
                          ttmp:student_pretrained_model_name.find(
