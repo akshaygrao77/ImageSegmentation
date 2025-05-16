@@ -26,6 +26,18 @@ import torchmetrics.functional as F_metrics
 from torchmetrics.functional import dice, accuracy, jaccard_index
 from typing import Dict, List, Tuple
 
+class CosineFeatureLoss(nn.Module):
+    def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, student_feat: torch.Tensor, teacher_feat: torch.Tensor) -> torch.Tensor:
+        # Flatten spatial dimensions, keep batch
+        s_flat = student_feat.flatten(1)
+        t_flat = teacher_feat.flatten(1)
+        cosine_sim = F.cosine_similarity(s_flat, t_flat, dim=1, eps=self.eps)  # shape: (batch,)
+        return 1 - cosine_sim.mean()
+
 run_gtl = run_kdl = run_fl = 1.0
 def distillation_losses(gt_loss,distill_config,teacher_logits,student_logits,feature_maps,student_projections):
     global run_gtl, run_kdl, run_fl
@@ -36,36 +48,38 @@ def distillation_losses(gt_loss,distill_config,teacher_logits,student_logits,fea
         reduction="batchmean",
     ) * (T * T)
     
-    alpha_ce = distill_config.get("alpha_ce", 0.25)
-    alpha_kd = distill_config.get("alpha_kd", 0.25)
-    alpha_feat = distill_config.get("alpha_feat", 0.25)
+    alpha_ce = distill_config.get("alpha_ce", 0.5)
+    alpha_kd = distill_config.get("alpha_kd", 0.5)
+    alpha_feat = distill_config.get("alpha_feat", 0.)
 
     feat_loss = 0.0
-    for t_layer, s_layer in distill_config.get("feature_layers", []):
-        t_feat = feature_maps["teacher"][t_layer]
-        s_feat = feature_maps["student"][s_layer]
-        # Unpack tuple outputs
-        if isinstance(t_feat, (list, tuple)):
-            t_feat = t_feat[0]
-        if isinstance(s_feat, (list, tuple)):
-            s_feat = s_feat[0]
-        # Apply projection if shape mismatch
-        if t_feat.shape != s_feat.shape:
-            tmp = s_layer.replace(".","___")
-            if tmp in student_projections:
-                proj = student_projections[tmp]
-            else:
-                raise ValueError("Key :{tmp} was not found in student_projections")
-            if proj is not None:
-                # Align dtype: cast s_feat to proj dtype, apply projection, then cast back
-                orig_dtype = s_feat.dtype
-                target_dtype = next(proj.parameters()).dtype
-                s_feat_cast = s_feat.to(target_dtype)
-                s_feat = proj(s_feat_cast).to(orig_dtype)
-        feat_loss += distill_config.get("feature_loss_fn", F.mse_loss)(s_feat, t_feat)
+    if alpha_feat > 0:
+        for t_layer, s_layer in distill_config.get("feature_layers", []):
+            t_feat = feature_maps["teacher"][t_layer]
+            s_feat = feature_maps["student"][s_layer]
+            # Unpack tuple outputs
+            if isinstance(t_feat, (list, tuple)):
+                t_feat = t_feat[0]
+            if isinstance(s_feat, (list, tuple)):
+                s_feat = s_feat[0]
+            # Apply projection if shape mismatch
+            if t_feat.shape != s_feat.shape:
+                tmp = s_layer.replace(".","___")
+                if tmp in student_projections:
+                    proj = student_projections[tmp]
+                else:
+                    raise ValueError("Key :{tmp} was not found in student_projections")
+                if proj is not None:
+                    # Align dtype: cast s_feat to proj dtype, apply projection, then cast back
+                    orig_dtype = s_feat.dtype
+                    target_dtype = next(proj.parameters()).dtype
+                    s_feat_cast = s_feat.to(target_dtype)
+                    s_feat = proj(s_feat_cast).to(orig_dtype)
+            feat_loss += distill_config.get("feature_loss_fn", F.mse_loss)(s_feat, t_feat)
 
     run_gtl = 0.99 * run_gtl + 0.01 * gt_loss.detach()
-    run_fl = 0.99 * run_fl + 0.01 * feat_loss.detach()
+    if alpha_feat > 0:
+        run_fl = 0.99 * run_fl + 0.01 * feat_loss.detach()
     run_kdl = 0.99 * run_kdl + 0.01 * kd_loss.detach()
     return alpha_ce * (gt_loss/run_gtl) + alpha_kd * (kd_loss/run_kdl) + alpha_feat * (feat_loss/run_fl)
 
@@ -406,36 +420,40 @@ if __name__ == '__main__':
     if (accelerator is None or accelerator.is_main_process):
         print(f"teacher_save_prefix:{teacher_save_prefix} student_save_prefix:{student_save_prefix}")
 
-    match_feature_layers = get_matching_layers(teacher_model, student_model, capture_list=get_feature_map_capture_list_for_model_type(student_model),start_prefix="")
-    feature_shapes = {
-            "teacher": get_feature_shapes(teacher_model, [t for t, _ in match_feature_layers]),
-            "student": get_feature_shapes(student_model, [s for _, s in match_feature_layers])
-    }
-    if (accelerator is None or accelerator.is_main_process):
-        print(f"feature_shapes : {feature_shapes}")
-
-    student_model.projection_heads = create_projection_heads(match_feature_layers, feature_shapes)
-    if (accelerator is None or accelerator.is_main_process):
-        print(f"student_model.projection_heads :{student_model.projection_heads}")
-
-    match_feature_layers = get_matching_layers(teacher_model, student_model, capture_list=get_feature_map_capture_list_for_model_type(student_model),start_prefix="module")
-    if (accelerator is None or accelerator.is_main_process):
-        print(f"match_feature_layers:::{match_feature_layers}")
-
     # Example distillation configuration:
     distillation_config = {
-        "temperature": 2.0,
-        "alpha_ce": 0.33,
-        "alpha_kd": 0.33,
-        "alpha_feat": 0.33,
-        "feature_layers": match_feature_layers,
-        "feature_loss_fn": F.mse_loss,
+        "temperature": 4.0,
+        "alpha_ce": 1,
+        "alpha_kd": 10,
+        "alpha_feat": 0.,
+        "feature_loss_fn": CosineFeatureLoss(),
         "attn_loss_fn": lambda s, t: F.kl_div(
             F.log_softmax(s, dim=-1),
             F.softmax(t, dim=-1),
             reduction="batchmean"
         ),
     }
+
+    if distillation_config.get("alpha_feat",0) > 0:
+        match_feature_layers = get_matching_layers(teacher_model, student_model, capture_list=get_feature_map_capture_list_for_model_type(student_model),start_prefix="")
+        feature_shapes = {
+                "teacher": get_feature_shapes(teacher_model, [t for t, _ in match_feature_layers]),
+                "student": get_feature_shapes(student_model, [s for _, s in match_feature_layers])
+        }
+        if (accelerator is None or accelerator.is_main_process):
+            print(f"feature_shapes : {feature_shapes}")
+
+        student_model.projection_heads = create_projection_heads(match_feature_layers, feature_shapes)
+        if (accelerator is None or accelerator.is_main_process):
+            print(f"student_model.projection_heads :{student_model.projection_heads}")
+    else:
+        student_model.projection_heads = None
+
+    match_feature_layers = get_matching_layers(teacher_model, student_model, capture_list=get_feature_map_capture_list_for_model_type(student_model),start_prefix="module")
+    if (accelerator is None or accelerator.is_main_process):
+        print(f"match_feature_layers:::{match_feature_layers}")
+
+    distillation_config["feature_layers"] = match_feature_layers
 
     best_perf_metric = 0
     if (student_path is not None):
