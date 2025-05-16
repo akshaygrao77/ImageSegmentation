@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from transformers.modeling_outputs import ModelOutput
 from typing import NamedTuple, Optional
-from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation,Mask2FormerForUniversalSegmentation
+from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation,Mask2FormerForUniversalSegmentation,MobileViTForSemanticSegmentation
 from peft import LoraConfig, get_peft_model
 
 class SegmentationOutput(NamedTuple):
@@ -35,6 +35,9 @@ class BaseSegModel(nn.Module):
         elif "mask2former" in model_name:
             self.base_model = Mask2FormerForUniversalSegmentation.from_pretrained(model_name,num_labels=num_labels-1,
                                                                 ignore_mismatched_sizes=ignore_mismatched_sizes)
+        elif "deeplabv3-mobilevit" in model_name:
+            self.base_model = MobileViTForSemanticSegmentation.from_pretrained(model_name, num_labels=num_labels,
+                                                           ignore_mismatched_sizes=ignore_mismatched_sizes)
         else:
             raise ValueError(f"Wrong model_name:{model_name}. It needs to have be either segformer or mask2former.")
     
@@ -86,6 +89,8 @@ class BaseSegModel(nn.Module):
     ) -> SegmentationOutput:
         if 'segformer' in self.model_name.lower():
             outputs = self.base_model(images, labels=labels)
+        elif "deeplabv3-mobilevit" in self.model_name.lower():
+            outputs = self.base_model(images, labels=labels)
         elif 'mask2former' in self.model_name.lower():
             if labels is None:
                 outputs = self.base_model(images, labels=labels)
@@ -129,6 +134,9 @@ class BaseSegModel(nn.Module):
         pixel_values: torch.Tensor
     ) -> torch.Tensor:
         if 'segformer' in self.model_name.lower():
+            logits = outputs.logits
+            return logits
+        elif "deeplabv3-mobilevit" in self.model_name.lower():
             logits = outputs.logits
             return logits
         elif 'mask2former' in self.model_name:
@@ -224,6 +232,10 @@ class Fusion_SegModel(nn.Module):
             superseg_masks = self.supersegmodel(inp).logits
         # Pass the input through the segmentation model
         output = self.model(inp,labels)
+        # Downsample supersegmask when its size changes from current model output
+        if superseg_masks.shape != output.logits.shape:
+            superseg_masks = F.interpolate(superseg_masks, size=output.logits.shape[-2:], mode="bilinear", align_corners=False)
+        # print(f"output.logits:{output.logits.size()}, superseg_masks:{superseg_masks.size()}")
         # Concatenate the output masks with the superclass segmentation masks
         combined_masks = torch.cat([output.logits, superseg_masks], dim=1)  # Shape: (B, C+M, H, W)
 

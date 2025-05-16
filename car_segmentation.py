@@ -471,7 +471,7 @@ if __name__ == '__main__':
     alpha = 0.5
 
     # None, 'hierarchical' , 'fusion' , 'extend_tune' , 'ex_fusion' , 'moe_fusion'
-    model_type = 'fusion'
+    model_type = None
 
     # Wrap SegFormer with LoRA
     lora_config = None
@@ -495,8 +495,9 @@ if __name__ == '__main__':
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
     # pretrained_model_name = "nvidia/segformer-b3-finetuned-ade-512-512"
     # pretrained_model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-    pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
-    pretrained_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
+    # pretrained_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    pretrained_model_name = "apple/deeplabv3-mobilevit-xx-small"
+    # pretrained_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
     datadir = "./data/car-parts-and-car-damages/"
     tmp_dir = os.path.join(datadir, dataset)
 
@@ -549,19 +550,20 @@ if __name__ == '__main__':
     continue_run_id = None
     # continue_run_id = "29puyrds"
 
-    superseg_ds = "Car_parts_dataset"
+    superseg_ds = "Car_DD_dataset"
     # superseg_model_name = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
-    superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
+    # superseg_model_name = "nvidia/segformer-b5-finetuned-ade-640-640"
     superseg_model_name = "nvidia/segformer-b0-finetuned-ade-512-512"
+    super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b0-finetuned-ade-512-512_best.pt"
     # Below is second best supersegformer
     # super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
-    super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_parts_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
+    # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_parts_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
     # Below is best supersegformer
     # super_segmodel_path = "./checkpoints/Car_parts_dataset/dice_0.5/nvidia_segformer-b5-finetuned-ade-640-640_ep_39.pt"
     # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
     # super_segmodel_path = "./checkpoints/Car_parts_dataset/nvidia_segformer-b3-finetuned-cityscapes-1024-1024_ep_90.pt"
     # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_DD_dataset/wt_all_dynamic_0.5/nvidia_segformer-b5-finetuned-ade-640-640_best.pt"
-    super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_parts_dataset/wt_all_dynamic_0.5/nvidia_segformer-b0-finetuned-ade-512-512_best.pt"
+    # super_segmodel_path = "./new_checkpoints/high_aug_tnorm_/Car_parts_dataset/wt_all_dynamic_0.5/nvidia_segformer-b0-finetuned-ade-512-512_best.pt"
 
     if (start_net_path is not None):
         lora_config = get_loraconfig_from_path(start_net_path)
@@ -655,6 +657,8 @@ if __name__ == '__main__':
             ttmp = pretrained_model_name.find("segformer") + len("segformer") + 1
         elif "mask2former" in pretrained_model_name:
             ttmp = pretrained_model_name.find("mask2former") + len("mask2former") + 1
+        elif "deeplabv3-mobilevit" in pretrained_model_name:
+            ttmp = pretrained_model_name.find("deeplabv3-mobilevit") + len("deeplabv3-mobilevit") + 1
         wandb_config = dict()
         wandb_config["optimizer"] = optimizer
         if(accelerator is not None):
